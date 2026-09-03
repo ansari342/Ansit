@@ -18,10 +18,8 @@
       "infoPlist": {
         "UIBackgroundModes": [
           "audio"
-        ]
-      },
-      "entitlements": {
-        "com.apple.developer.carplay-audio": true
+        ],
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
@@ -42,6 +40,9 @@
         "projectId": "3abd66eb-1a11-4070-8731-23861f5546eb"
       }
     },
-    "owner": "ansari342"
+    "owner": "ansari342",
+    "plugins": [
+      "expo-font"
+    ]
   }
 }

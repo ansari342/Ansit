@@ -30,6 +30,7 @@ import {
 } from '../data/reciterTimings';
 import { SoundwaveVisualizer } from './SoundwaveVisualizer';
 import { BouncyTouchable } from './BouncyTouchable';
+import { SegmentedPlaybackBar } from './SegmentedPlaybackBar';
 import { updateCarPlayState } from '../services/carPlayService';
 
 interface PlaybackStateReport {
@@ -70,6 +71,9 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
   const [currentVerseNum, setCurrentVerseNum] = useState<number>(fromVerse);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [durationMillis, setDurationMillis] = useState<number>(1);
+  const [currentVersePositionMillis, setCurrentVersePositionMillis] = useState<number>(0);
+  const [currentVerseDurationMillis, setCurrentVerseDurationMillis] = useState<number>(1);
+  const isUserScrubbingRef = useRef<boolean>(false);
   const [verseTimings, setVerseTimings] = useState<Record<number, AyahTiming>>({});
 
   const isTimedReciter = !!reciter.isSurahBased;
@@ -229,11 +233,15 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     async (ayahNum: number, iteration: number = 1) => {
       setCurrentVerseNum(ayahNum);
       setVersePlayCount(iteration);
+      setCurrentVersePositionMillis(0);
       animateVerseChange();
 
       if (isTimedReciter) {
         const timing = stateRef.current.verseTimings[ayahNum];
         const startSeekMs = timing?.startMs || 0;
+        if (timing) {
+          setCurrentVerseDurationMillis(Math.max(1, timing.endMs - timing.startMs));
+        }
 
         const sound = await loadAndPlayAyah(
           surah.number,
@@ -258,6 +266,17 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
               loopSettings: settings,
               verseTimings: timings,
             } = stateRef.current;
+
+            // Update scrubber position within current verse
+            if (!isUserScrubbingRef.current) {
+              const currentTiming = timings[curr];
+              if (currentTiming) {
+                const ayahDur = Math.max(1, currentTiming.endMs - currentTiming.startMs);
+                const ayahPos = Math.max(0, Math.min(ayahDur, pos - currentTiming.startMs));
+                setCurrentVersePositionMillis(ayahPos);
+                setCurrentVerseDurationMillis(ayahDur);
+              }
+            }
 
             // Contiguous boundary check
             for (let a = from; a <= to; a++) {
@@ -305,6 +324,13 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
           loopSettings.playbackSpeed,
           status => {
             setIsPlaying(status.isPlaying);
+
+            if (!isUserScrubbingRef.current) {
+              setCurrentVersePositionMillis(status.positionMillis || 0);
+              if (status.durationMillis && status.durationMillis > 0) {
+                setCurrentVerseDurationMillis(status.durationMillis);
+              }
+            }
 
             if (status.didJustFinish) {
               handleDiscreteVerseFinished();
@@ -467,6 +493,49 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     }
   }, [isPlaying, currentVerseNum, surah, reciter, onPlaybackStateChange]);
 
+  const handleSeekingChange = useCallback((isSeeking: boolean) => {
+    isUserScrubbingRef.current = isSeeking;
+  }, []);
+
+  const handleSeekAyah = useCallback(
+    async (targetAyah: number, seekFraction: number = 0) => {
+      isUserScrubbingRef.current = false;
+      if (isTimedReciter) {
+        const timing = stateRef.current.verseTimings[targetAyah];
+        if (timing) {
+          const ayahDuration = Math.max(1, timing.endMs - timing.startMs);
+          const seekOffsetMs = Math.round(seekFraction * ayahDuration);
+          const targetPosMs = timing.startMs + seekOffsetMs;
+
+          if (targetAyah !== stateRef.current.currentVerseNum) {
+            setCurrentVerseNum(targetAyah);
+            animateVerseChange();
+          }
+
+          setCurrentVersePositionMillis(seekOffsetMs);
+          setCurrentVerseDurationMillis(ayahDuration);
+          await seekAudio(targetPosMs);
+        }
+      } else {
+        if (targetAyah !== stateRef.current.currentVerseNum) {
+          await playVerse(targetAyah, 1);
+          if (seekFraction > 0) {
+            const dur = currentVerseDurationMillis > 1 ? currentVerseDurationMillis : 10000;
+            const seekPosMs = Math.round(seekFraction * dur);
+            setCurrentVersePositionMillis(seekPosMs);
+            await seekAudio(seekPosMs);
+          }
+        } else {
+          const dur = currentVerseDurationMillis > 1 ? currentVerseDurationMillis : 10000;
+          const seekPosMs = Math.round(seekFraction * dur);
+          setCurrentVersePositionMillis(seekPosMs);
+          await seekAudio(seekPosMs);
+        }
+      }
+    },
+    [isTimedReciter, animateVerseChange, playVerse, currentVerseDurationMillis]
+  );
+
   const handlePreviousVerse = async () => {
     try {
       await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -604,8 +673,19 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         </Animated.View>
       </View>
 
-      {/* 4. PERMANENTLY STATIC BOTTOM SECTION WITH BOUNCY CONTROLS */}
+      {/* 4. PERMANENTLY STATIC BOTTOM SECTION WITH SCRUBBER & CONTROLS */}
       <View style={styles.bottomSection}>
+        {/* Interactive Scrubber Bar */}
+        <SegmentedPlaybackBar
+          fromVerse={fromVerse}
+          toVerse={toVerse}
+          currentVerseNum={currentVerseNum}
+          positionMillis={currentVersePositionMillis}
+          durationMillis={currentVerseDurationMillis}
+          onSeekAyah={handleSeekAyah}
+          onSeekingChange={handleSeekingChange}
+        />
+
         {/* Simplified Verse Indicator: e.g. Verse 5/7 */}
         <View style={styles.verseIndicatorBanner}>
           <Text style={styles.verseIndicatorText}>
@@ -828,8 +908,8 @@ const styles = StyleSheet.create({
   },
   bottomSection: {
     paddingHorizontal: 24,
-    paddingBottom: 32,
-    paddingTop: 12,
+    paddingBottom: 28,
+    paddingTop: 4,
     backgroundColor: '#080b11',
   },
   verseIndicatorBanner: {
@@ -838,9 +918,10 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     backgroundColor: '#0f1726',
     paddingHorizontal: 16,
-    paddingVertical: 7,
+    paddingVertical: 6,
     borderRadius: 16,
-    marginBottom: 16,
+    marginTop: 2,
+    marginBottom: 14,
     borderWidth: 1,
     borderColor: '#1e2d44',
   },

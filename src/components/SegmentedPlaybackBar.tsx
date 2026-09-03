@@ -221,7 +221,9 @@ export const SegmentedPlaybackBar: React.FC<SegmentedPlaybackBarProps> = ({
           <Text style={styles.timeText}>{formatTime(positionMillis)}</Text>
           <View style={styles.verseBadge}>
             <Text style={styles.verseBadgeText}>
-              Ayah {displayAyah - fromVerse + 1} of {totalVerses}
+              {totalVerses > 1
+                ? `Ayah ${displayAyah} (${displayAyah - fromVerse + 1}/${totalVerses})`
+                : `Ayah ${displayAyah}`}
             </Text>
           </View>
         </View>
