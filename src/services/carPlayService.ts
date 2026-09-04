@@ -3,23 +3,37 @@ import { Surah, Reciter, Verse } from '../types';
 export interface CarPlayState {
   currentSurah?: Surah;
   currentVerseNum?: number;
+  fromVerse?: number;
+  toVerse?: number;
   reciter?: Reciter;
   isPlaying: boolean;
+  loopIteration?: number;
+  maxLoops?: number;
 }
 
-let activeCarPlayState: CarPlayState = {
+export type NowPlayingMediaState = CarPlayState;
+
+let activeMediaState: CarPlayState = {
   isPlaying: false,
 };
 
 /**
- * Updates the active audio state that feeds CarPlay and the vehicle head-unit
+ * Updates the active audio state that feeds Dynamic Island, CarPlay, and lock screen
  */
+export function updateNowPlayingState(newState: Partial<CarPlayState>) {
+  activeMediaState = { ...activeMediaState, ...newState };
+}
+
+export function getNowPlayingState(): CarPlayState {
+  return activeMediaState;
+}
+
 export function updateCarPlayState(newState: Partial<CarPlayState>) {
-  activeCarPlayState = { ...activeCarPlayState, ...newState };
+  updateNowPlayingState(newState);
 }
 
 export function getCarPlayState(): CarPlayState {
-  return activeCarPlayState;
+  return getNowPlayingState();
 }
 
 /**
