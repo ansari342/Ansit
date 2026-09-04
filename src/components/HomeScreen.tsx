@@ -205,13 +205,10 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#080b11" />
 
-      {/* Top Header: Ansit • أَنْصِتْ Brand */}
+      {/* Top Header: Ansit Brand */}
       <View style={styles.header}>
         <View style={styles.headerLeft}>
-          <View style={styles.headerBrandRow}>
-            <Text style={styles.headerTitleAnsit}>Ansit</Text>
-            <Text style={styles.headerTitleArabic}>أَنْصِتْ</Text>
-          </View>
+          <Text style={styles.headerTitleAnsit}>Ansit</Text>
         </View>
 
         <View style={styles.headerRight}>
