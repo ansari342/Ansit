@@ -35,10 +35,21 @@ const DEFAULT_ANALYTICS: UserAnalytics = {
   currentStreakDays: 3,
   lastListenDate: getTodayString(),
   surahCounts: {
-    67: 14, // Al-Mulk
     1: 6,   // Al-Fatihah
-    18: 3,  // Al-Kahf
-    36: 1,  // Ya-Sin
+    2: 8,   // Al-Baqarah
+    18: 4,  // Al-Kahf
+    36: 3,  // Ya-Sin
+    55: 9,  // Ar-Rahman
+    56: 5,  // Al-Waqi'ah
+    67: 14, // Al-Mulk (Top)
+    78: 3,  // An-Naba
+    93: 6,  // Ad-Duha
+    94: 5,  // Ash-Sharh
+    97: 4,  // Al-Qadr
+    108: 7, // Al-Kawthar
+    112: 12,// Al-Ikhlas
+    113: 8, // Al-Falaq
+    114: 9, // An-Nas
   },
   verseCounts: {
     '67:1': 32, // Al-Mulk verse 1

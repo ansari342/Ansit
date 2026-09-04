@@ -18,6 +18,7 @@ import {
   getTopReciter,
   UserAnalytics,
 } from '../services/analyticsService';
+import { SURAHS } from '../data/surahs';
 import { BouncyTouchable } from './BouncyTouchable';
 
 const { width } = Dimensions.get('window');
@@ -34,10 +35,17 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
   onPlayTopSession,
 }) => {
   const [analytics, setAnalytics] = useState<UserAnalytics | null>(null);
+  const [selectedSurahNumber, setSelectedSurahNumber] = useState<number>(67);
 
   useEffect(() => {
     if (visible) {
-      getAnalytics().then(setAnalytics);
+      getAnalytics().then(data => {
+        setAnalytics(data);
+        const top = getTopSurah(data);
+        if (top) {
+          setSelectedSurahNumber(top.surah.number);
+        }
+      });
     }
   }, [visible]);
 
@@ -58,6 +66,33 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
 
   const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
   const maxWeeklyMin = Math.max(1, ...Object.values(analytics.weeklyMinutes));
+
+  // 114 Surahs GitHub Heatmap calculation
+  const distinctSurahsPlayed = Object.keys(analytics.surahCounts || {}).filter(
+    num => (analytics.surahCounts[Number(num)] || 0) > 0
+  ).length;
+  const quranPercentage = Math.round((distinctSurahsPlayed / 114) * 100);
+
+  const selectedSurah = SURAHS.find(s => s.number === selectedSurahNumber) || SURAHS[66];
+  const selectedSurahPlays = analytics.surahCounts[selectedSurah.number] || 0;
+
+  // 19 columns x 6 rows = 114 Surahs
+  const heatmapColumns = React.useMemo(() => {
+    const cols: (typeof SURAHS)[] = [];
+    const rowsPerCol = 6;
+    for (let c = 0; c < 19; c++) {
+      cols.push(SURAHS.slice(c * rowsPerCol, (c + 1) * rowsPerCol));
+    }
+    return cols;
+  }, []);
+
+  const getSurahColor = (count: number) => {
+    if (count === 0) return '#131929';
+    if (count <= 2) return '#1e3a68'; // Level 1 - subtle deep blue
+    if (count <= 5) return '#2563eb'; // Level 2 - vibrant blue
+    if (count <= 9) return '#38bdf8'; // Level 3 - bright sky cyan
+    return '#9bbfff';                 // Level 4 - signature glowing sapphire
+  };
 
   return (
     <Modal
@@ -150,6 +185,142 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
               <Text style={styles.statLabel}>Top Reciter</Text>
               <Text style={styles.statSublabel}>{topReciter?.count || 0} sessions</Text>
             </View>
+          </View>
+
+          {/* GITHUB-STYLE SURAH HEATMAP (All 114 Surahs) */}
+          <View style={styles.heatmapCard}>
+            <View style={styles.heatmapHeader}>
+              <View style={styles.heatmapTitleCol}>
+                <View style={styles.heatmapTitleRow}>
+                  <Ionicons name="grid" size={13} color="#9bbfff" style={{ marginRight: 6 }} />
+                  <Text style={styles.heatmapTitle}>SURAH RECITATION HEATMAP</Text>
+                </View>
+                <Text style={styles.heatmapSub}>All 114 Surahs of the Holy Qur'an</Text>
+              </View>
+              <View style={styles.coverageBadge}>
+                <Text style={styles.coverageText}>{distinctSurahsPlayed}/114 Recited</Text>
+                <Text style={styles.coveragePercent}>{quranPercentage}% Coverage</Text>
+              </View>
+            </View>
+
+            {/* Quran Coverage Progress Bar */}
+            <View style={styles.quranProgressBarTrack}>
+              <View
+                style={[
+                  styles.quranProgressBarFill,
+                  { width: `${Math.max(4, quranPercentage)}%` },
+                ]}
+              />
+            </View>
+
+            {/* 114 Surahs Grid (19 columns x 6 rows) */}
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.heatmapScrollContainer}
+            >
+              <View style={styles.heatmapGrid}>
+                {heatmapColumns.map((col, colIdx) => (
+                  <View key={colIdx} style={styles.heatmapColumn}>
+                    {col.map(surah => {
+                      const count = analytics.surahCounts[surah.number] || 0;
+                      const isSelected = surah.number === selectedSurahNumber;
+                      const cellColor = getSurahColor(count);
+
+                      return (
+                        <TouchableOpacity
+                          key={surah.number}
+                          activeOpacity={0.65}
+                          style={[
+                            styles.heatmapCell,
+                            { backgroundColor: cellColor },
+                            isSelected && styles.heatmapCellSelected,
+                          ]}
+                          onPress={() => {
+                            try {
+                              Haptics.selectionAsync();
+                            } catch (e) {}
+                            setSelectedSurahNumber(surah.number);
+                          }}
+                        />
+                      );
+                    })}
+                  </View>
+                ))}
+              </View>
+            </ScrollView>
+
+            {/* GitHub-style Activity Legend */}
+            <View style={styles.legendRow}>
+              <Text style={styles.legendLeftText}>Tap any cell to inspect</Text>
+              <View style={styles.legendRight}>
+                <Text style={styles.legendText}>0</Text>
+                <View style={[styles.legendCell, { backgroundColor: '#131929' }]} />
+                <View style={[styles.legendCell, { backgroundColor: '#1e3a68' }]} />
+                <View style={[styles.legendCell, { backgroundColor: '#2563eb' }]} />
+                <View style={[styles.legendCell, { backgroundColor: '#38bdf8' }]} />
+                <View style={[styles.legendCell, { backgroundColor: '#9bbfff' }]} />
+                <Text style={styles.legendText}>10+</Text>
+              </View>
+            </View>
+
+            {/* Selected Surah Interactive Inspection Card */}
+            {selectedSurah && (
+              <View style={styles.inspectionCard}>
+                <View style={styles.inspectionTop}>
+                  <View style={styles.inspectionNumBadge}>
+                    <Text style={styles.inspectionNumText}>#{selectedSurah.number}</Text>
+                  </View>
+
+                  <View style={styles.inspectionTitles}>
+                    <Text style={styles.inspectionEnglishName} numberOfLines={1}>
+                      Surah {selectedSurah.englishName}
+                    </Text>
+                    <Text style={styles.inspectionMeta}>
+                      {selectedSurah.numberOfAyahs} Verses • {selectedSurah.revelationType}
+                    </Text>
+                  </View>
+
+                  <Text style={styles.inspectionArabicName}>
+                    {selectedSurah.name}
+                  </Text>
+                </View>
+
+                <View style={styles.inspectionBottom}>
+                  <View style={styles.inspectionStatsRow}>
+                    <Ionicons
+                      name={selectedSurahPlays > 0 ? 'headset' : 'headset-outline'}
+                      size={14}
+                      color={selectedSurahPlays > 0 ? '#9bbfff' : '#64748b'}
+                      style={{ marginRight: 6 }}
+                    />
+                    <Text style={styles.inspectionPlaysText}>
+                      {selectedSurahPlays > 0
+                        ? `${selectedSurahPlays} ${selectedSurahPlays === 1 ? 'Listen' : 'Listens'}`
+                        : 'No recorded listens yet'}
+                    </Text>
+                    {selectedSurahPlays >= 10 && (
+                      <View style={styles.topPill}>
+                        <Text style={styles.topPillText}>🔥 Most Active</Text>
+                      </View>
+                    )}
+                  </View>
+
+                  {onPlayTopSession && (
+                    <BouncyTouchable
+                      style={styles.inspectionPlayBtn}
+                      onPress={() => {
+                        onClose();
+                        onPlayTopSession(selectedSurah.number, 1, selectedSurah.numberOfAyahs);
+                      }}
+                    >
+                      <Ionicons name="play" size={11} color="#080b11" style={{ marginRight: 4 }} />
+                      <Text style={styles.inspectionPlayBtnText}>Loop Surah</Text>
+                    </BouncyTouchable>
+                  )}
+                </View>
+              </View>
+            )}
           </View>
 
           {/* HIGHLIGHT 1: Most Listened Verse */}
@@ -643,5 +814,220 @@ const styles = StyleSheet.create({
     color: '#64748b',
     fontSize: 11,
     fontWeight: '600',
+  },
+  // Heatmap styles
+  heatmapCard: {
+    backgroundColor: '#0c1220',
+    borderRadius: 18,
+    padding: 16,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#19263e',
+  },
+  heatmapHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  heatmapTitleCol: {
+    flex: 1,
+    marginRight: 8,
+  },
+  heatmapTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  heatmapTitle: {
+    color: '#9bbfff',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+  },
+  heatmapSub: {
+    color: '#8e9fb5',
+    fontSize: 11,
+    marginTop: 2,
+  },
+  coverageBadge: {
+    backgroundColor: 'rgba(155, 191, 255, 0.12)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    alignItems: 'flex-end',
+    borderWidth: 1,
+    borderColor: 'rgba(155, 191, 255, 0.25)',
+  },
+  coverageText: {
+    color: '#ffffff',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  coveragePercent: {
+    color: '#9bbfff',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  quranProgressBarTrack: {
+    height: 4,
+    backgroundColor: '#162238',
+    borderRadius: 2,
+    marginVertical: 10,
+    overflow: 'hidden',
+  },
+  quranProgressBarFill: {
+    height: '100%',
+    backgroundColor: '#38bdf8',
+    borderRadius: 2,
+  },
+  heatmapScrollContainer: {
+    paddingVertical: 6,
+  },
+  heatmapGrid: {
+    flexDirection: 'row',
+    gap: 4,
+  },
+  heatmapColumn: {
+    flexDirection: 'column',
+    gap: 4,
+  },
+  heatmapCell: {
+    width: 14,
+    height: 14,
+    borderRadius: 3,
+    borderWidth: 0.5,
+    borderColor: 'rgba(255, 255, 255, 0.05)',
+  },
+  heatmapCellSelected: {
+    borderColor: '#ffffff',
+    borderWidth: 1.5,
+    transform: [{ scale: 1.2 }],
+    zIndex: 10,
+    shadowColor: '#9bbfff',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.9,
+    shadowRadius: 5,
+  },
+  legendRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 10,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#162238',
+  },
+  legendLeftText: {
+    color: '#64748b',
+    fontSize: 10,
+    fontStyle: 'italic',
+  },
+  legendRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+  },
+  legendText: {
+    color: '#64748b',
+    fontSize: 10,
+    marginHorizontal: 3,
+  },
+  legendCell: {
+    width: 10,
+    height: 10,
+    borderRadius: 2,
+  },
+  inspectionCard: {
+    backgroundColor: '#11192b',
+    borderRadius: 14,
+    padding: 12,
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: '#223454',
+  },
+  inspectionTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  inspectionNumBadge: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    backgroundColor: 'rgba(155, 191, 255, 0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(155, 191, 255, 0.3)',
+  },
+  inspectionNumText: {
+    color: '#9bbfff',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  inspectionTitles: {
+    flex: 1,
+    marginLeft: 10,
+    marginRight: 8,
+  },
+  inspectionEnglishName: {
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  inspectionMeta: {
+    color: '#8e9fb5',
+    fontSize: 11,
+    marginTop: 1,
+  },
+  inspectionArabicName: {
+    color: '#9bbfff',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  inspectionBottom: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.06)',
+  },
+  inspectionStatsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  inspectionPlaysText: {
+    color: '#cbd5e1',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  topPill: {
+    backgroundColor: 'rgba(251, 146, 60, 0.15)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    marginLeft: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(251, 146, 60, 0.3)',
+  },
+  topPillText: {
+    color: '#fb923c',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  inspectionPlayBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#9bbfff',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  inspectionPlayBtnText: {
+    color: '#080b11',
+    fontSize: 11,
+    fontWeight: '800',
   },
 });
