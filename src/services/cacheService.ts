@@ -1,6 +1,6 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { Reciter } from '../types';
-import { getAudioUrl } from '../data/reciters';
+import { getAudioUrl, BASE_RECITERS } from '../data/reciters';
 
 const AUDIO_DIR = `${FileSystem.cacheDirectory}quran_audio/`;
 
@@ -20,12 +20,13 @@ async function ensureDirectoryExists(): Promise<void> {
 }
 
 export function getLocalAudioUri(reciter: Reciter, surah: number, ayah: number): string {
+  const actualReciter = reciter.id === 'multiple' ? BASE_RECITERS[0] : reciter;
   const surahStr = surah.toString().padStart(3, '0');
-  if (reciter.isSurahBased) {
-    return `${AUDIO_DIR}${reciter.id}_${surahStr}.mp3`;
+  if (actualReciter.isSurahBased) {
+    return `${AUDIO_DIR}${actualReciter.id}_${surahStr}.mp3`;
   }
   const ayahStr = ayah.toString().padStart(3, '0');
-  return `${AUDIO_DIR}${reciter.id}_${surahStr}${ayahStr}.mp3`;
+  return `${AUDIO_DIR}${actualReciter.id}_${surahStr}${ayahStr}.mp3`;
 }
 
 export async function getOrDownloadVerseAudio(

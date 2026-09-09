@@ -1,6 +1,16 @@
 import { Reciter } from '../types';
 
-export const RECITERS: Reciter[] = [
+export const MULTIPLE_RECITER_ID = 'multiple';
+
+export const MULTIPLE_RECITER: Reciter = {
+  id: MULTIPLE_RECITER_ID,
+  name: 'Multiple Reciters',
+  shortName: 'Multiple',
+  subfolder: 'multiple',
+  badge: 'Cycles on Loop',
+};
+
+export const BASE_RECITERS: Reciter[] = [
   {
     id: 'mishary',
     name: 'Mishary Rashid Alafasy',
@@ -150,17 +160,23 @@ export const RECITERS: Reciter[] = [
   },
 ];
 
+export const RECITERS: Reciter[] = [
+  MULTIPLE_RECITER,
+  ...BASE_RECITERS,
+];
+
 export function getAudioUrl(reciter: Reciter, surahNumber: number, ayahNumber: number): string {
+  const actualReciter = reciter.id === MULTIPLE_RECITER_ID ? BASE_RECITERS[0] : reciter;
   const surahStr = surahNumber.toString().padStart(3, '0');
-  if (reciter.isSurahBased) {
-    if (reciter.surahUrlPattern) {
-      return reciter.surahUrlPattern
+  if (actualReciter.isSurahBased) {
+    if (actualReciter.surahUrlPattern) {
+      return actualReciter.surahUrlPattern
         .replace('{surah}', surahNumber.toString())
         .replace('{surah3}', surahStr);
     }
-    const base = reciter.baseUrl || 'https://server6.mp3quran.net/kurdi/';
+    const base = actualReciter.baseUrl || 'https://server6.mp3quran.net/kurdi/';
     return `${base}${surahStr}.mp3`;
   }
   const ayahStr = ayahNumber.toString().padStart(3, '0');
-  return `https://everyayah.com/data/${reciter.subfolder}/${surahStr}${ayahStr}.mp3`;
+  return `https://everyayah.com/data/${actualReciter.subfolder}/${surahStr}${ayahStr}.mp3`;
 }

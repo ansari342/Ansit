@@ -88,6 +88,7 @@ export default function App() {
     isPlaying: boolean;
     currentVerseNum: number;
     togglePlayPause: () => void;
+    currentReciterName?: string;
   }>({
     isPlaying: false,
     currentVerseNum: 1,
@@ -176,7 +177,10 @@ export default function App() {
                   Surah {session.surah.englishName}
                 </Text>
                 <Text style={styles.miniPlayerSubtitle} numberOfLines={1}>
-                  Verse {playbackState.currentVerseNum}/{session.toVerse} • {session.reciter.shortName}
+                  Verse {playbackState.currentVerseNum}/{session.toVerse} •{' '}
+                  {session.reciter.id === 'multiple'
+                    ? `Multiple (${playbackState.currentReciterName || 'Mishary'})`
+                    : session.reciter.shortName}
                 </Text>
               </View>
             </TouchableOpacity>

@@ -5,6 +5,7 @@ import {
   RECITER_TIMINGS,
   getSurahVerseTimings,
 } from '../data/reciterTimings';
+import { BASE_RECITERS } from '../data/reciters';
 
 // High-speed in-memory cache for 0ms lookups during playback
 const memoryTimingsCache = new Map<string, Record<number, AyahTiming>>();
@@ -27,18 +28,19 @@ export function getInstantTimings(
   verses: Verse[],
   totalDurationMs: number = 180000
 ): Record<number, AyahTiming> {
-  const key = getCacheKey(reciter.id, surahNumber);
+  const actualReciter = reciter.id === 'multiple' ? BASE_RECITERS[0] : reciter;
+  const key = getCacheKey(actualReciter.id, surahNumber);
   if (memoryTimingsCache.has(key)) {
     return memoryTimingsCache.get(key)!;
   }
 
-  if (RECITER_TIMINGS[reciter.id]?.[surahNumber]) {
-    const bundled = RECITER_TIMINGS[reciter.id][surahNumber];
+  if (RECITER_TIMINGS[actualReciter.id]?.[surahNumber]) {
+    const bundled = RECITER_TIMINGS[actualReciter.id][surahNumber];
     memoryTimingsCache.set(key, bundled);
     return bundled;
   }
 
-  return getSurahVerseTimings(reciter.id, surahNumber, verses, totalDurationMs);
+  return getSurahVerseTimings(actualReciter.id, surahNumber, verses, totalDurationMs);
 }
 
 /**
@@ -51,7 +53,8 @@ export async function fetchSurahVerseTimings(
   verses: Verse[],
   totalDurationMs?: number
 ): Promise<Record<number, AyahTiming>> {
-  const key = getCacheKey(reciter.id, surahNumber);
+  const actualReciter = reciter.id === 'multiple' ? BASE_RECITERS[0] : reciter;
+  const key = getCacheKey(actualReciter.id, surahNumber);
 
   // 1. Check in-memory cache
   if (memoryTimingsCache.has(key)) {

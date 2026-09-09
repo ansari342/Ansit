@@ -91,7 +91,7 @@ export const ReciterPickerModal: React.FC<ReciterPickerModalProps> = ({
               >
                 <View style={styles.avatarBadge}>
                   <MaterialCommunityIcons
-                    name="account-voice"
+                    name={item.id === 'multiple' ? 'account-multiple' : 'account-voice'}
                     size={22}
                     color={isSelected ? '#9bbfff' : '#64748b'}
                   />
@@ -109,7 +109,9 @@ export const ReciterPickerModal: React.FC<ReciterPickerModalProps> = ({
                     )}
                   </View>
                   <Text style={styles.reciterSub}>
-                    {item.isSurahBased
+                    {item.id === 'multiple'
+                      ? 'Cycles through all reciters on each loop'
+                      : item.isSurahBased
                       ? 'Full Surah Recitation • MP3Quran'
                       : 'Verse-by-Verse • EveryAyah'}
                   </Text>

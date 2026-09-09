@@ -29,6 +29,7 @@ import {
   RECITER_TIMINGS,
   getSurahVerseTimings,
 } from '../data/reciterTimings';
+import { BASE_RECITERS } from '../data/reciters';
 import {
   getInstantTimings,
   fetchSurahVerseTimings,
@@ -42,6 +43,7 @@ interface PlaybackStateReport {
   isPlaying: boolean;
   currentVerseNum: number;
   togglePlayPause: () => void;
+  currentReciterName?: string;
 }
 
 interface NowPlayingScreenProps {
@@ -81,7 +83,26 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
   const isUserScrubbingRef = useRef<boolean>(false);
   const [verseTimings, setVerseTimings] = useState<Record<number, AyahTiming>>({});
 
-  const isTimedReciter = !!reciter.isSurahBased;
+  const isMultipleMode = reciter.id === 'multiple';
+  const [multipleReciterIndex, setMultipleReciterIndex] = useState<number>(0);
+  const multipleReciterIndexRef = useRef<number>(0);
+
+  // Keep ref in sync
+  useEffect(() => {
+    multipleReciterIndexRef.current = multipleReciterIndex;
+  }, [multipleReciterIndex]);
+
+  // Reset index when reciter prop changes
+  useEffect(() => {
+    multipleReciterIndexRef.current = 0;
+    setMultipleReciterIndex(0);
+  }, [reciter.id]);
+
+  const currentEffectiveReciter = isMultipleMode
+    ? BASE_RECITERS[multipleReciterIndex]
+    : reciter;
+
+  const isTimedReciter = !!currentEffectiveReciter.isSurahBased;
 
   // Delightful Animation Values
   const cardOpacity = useRef(new Animated.Value(1)).current;
@@ -154,7 +175,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     fromVerse,
     toVerse,
     surah,
-    reciter,
+    reciter: currentEffectiveReciter,
     loopSettings,
     versePlayCount,
     verses,
@@ -167,7 +188,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     fromVerse,
     toVerse,
     surah,
-    reciter,
+    reciter: currentEffectiveReciter,
     loopSettings,
     versePlayCount,
     verses,
@@ -179,12 +200,17 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
   useEffect(() => {
     let isMounted = true;
     (async () => {
-      prefetchVerseRange(reciter, surah.number, fromVerse, toVerse);
+      const rec = isMultipleMode ? BASE_RECITERS[0] : reciter;
+      prefetchVerseRange(rec, surah.number, fromVerse, toVerse);
+      if (isMultipleMode && BASE_RECITERS.length > 1) {
+        prefetchVerseRange(BASE_RECITERS[1], surah.number, fromVerse, toVerse);
+      }
+
       const loaded = await getVersesForSurah(surah.number);
       if (isMounted) {
         setVerses(loaded);
         const initialTimings = getInstantTimings(
-          reciter,
+          rec,
           surah.number,
           loaded,
           durationMillis > 1000 ? durationMillis : 180000
@@ -192,9 +218,9 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         setVerseTimings(initialTimings);
         stateRef.current.verseTimings = initialTimings;
 
-        if (reciter.quranComId) {
+        if (rec.quranComId) {
           fetchSurahVerseTimings(
-            reciter,
+            rec,
             surah.number,
             loaded,
             durationMillis
@@ -214,15 +240,16 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       isMounted = false;
       stopAndUnloadAudio();
     };
-  }, [surah.number, reciter, fromVerse, toVerse]);
+  }, [surah.number, reciter.id, fromVerse, toVerse]);
 
   // Re-calculate precise verse timings whenever audio duration is loaded
   const updateTimingsWithDuration = useCallback(
     (totalDurMs: number) => {
+      const rec = isMultipleMode ? BASE_RECITERS[multipleReciterIndexRef.current] : reciter;
       if (totalDurMs > 1000 && verses.length > 0) {
-        if (!reciter.quranComId && !RECITER_TIMINGS[reciter.id]?.[surah.number]) {
+        if (!rec.quranComId && !RECITER_TIMINGS[rec.id]?.[surah.number]) {
           const timings = getSurahVerseTimings(
-            reciter.id,
+            rec.id,
             surah.number,
             verses,
             totalDurMs
@@ -232,7 +259,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         }
       }
     },
-    [reciter.id, reciter.quranComId, surah.number, verses]
+    [reciter.id, isMultipleMode, surah.number, verses]
   );
 
   // Determine upcoming ayah for discrete reciters
@@ -254,16 +281,21 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
 
   // 2. Playback logic
   const playVerse = useCallback(
-    async (ayahNum: number, iteration: number = 1) => {
+    async (ayahNum: number, iteration: number = 1, reciterOverride?: Reciter) => {
+      const activeRec =
+        reciterOverride ||
+        (isMultipleMode ? BASE_RECITERS[multipleReciterIndexRef.current] : reciter);
+      const isTimed = !!activeRec.isSurahBased;
+
       setCurrentVerseNum(ayahNum);
       setVersePlayCount(iteration);
       setCurrentVersePositionMillis(0);
       animateVerseChange();
 
-      if (isTimedReciter) {
+      if (isTimed) {
         let timing = stateRef.current.verseTimings[ayahNum];
         if (!timing) {
-          const instant = getInstantTimings(reciter, surah.number, verses, durationMillis);
+          const instant = getInstantTimings(activeRec, surah.number, verses, durationMillis);
           timing = instant[ayahNum];
         }
         const startSeekMs = timing?.startMs || 0;
@@ -274,7 +306,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         const sound = await loadAndPlayAyah(
           surah.number,
           1,
-          reciter,
+          activeRec,
           loopSettings.playbackSpeed,
           async status => {
             setIsPlaying(status.isPlaying);
@@ -362,7 +394,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         const sound = await loadAndPlayAyah(
           surah.number,
           ayahNum,
-          reciter,
+          activeRec,
           loopSettings.playbackSpeed,
           status => {
             setIsPlaying(status.isPlaying);
@@ -387,7 +419,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
             preloadUpcomingVerse(
               surah.number,
               upcoming,
-              reciter,
+              activeRec,
               loopSettings.playbackSpeed
             );
           }
@@ -397,22 +429,54 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     [
       surah.number,
       reciter,
+      isMultipleMode,
       loopSettings.playbackSpeed,
       loopSettings.mode,
       loopSettings.verseRepeatCount,
-      isTimedReciter,
       durationMillis,
       updateTimingsWithDuration,
       animateVerseChange,
+      verses,
     ]
   );
 
-  // Trigger initial playback once verses are loaded
-  useEffect(() => {
-    if (verses.length > 0) {
-      playVerse(fromVerse, 1);
+  // Advance to next reciter when a loop cycle completes in Multiple Reciters mode
+  const advanceToNextReciterAndLoop = async (targetAyah: number) => {
+    stateRef.current.isLoopingTransition = true;
+    const nextIndex = (multipleReciterIndexRef.current + 1) % BASE_RECITERS.length;
+    multipleReciterIndexRef.current = nextIndex;
+    setMultipleReciterIndex(nextIndex);
+
+    const nextReciter = BASE_RECITERS[nextIndex];
+    stateRef.current.reciter = nextReciter;
+
+    // 1. Prepare timings for next reciter
+    const nextTimings = getInstantTimings(
+      nextReciter,
+      surah.number,
+      verses,
+      durationMillis > 1000 ? durationMillis : 180000
+    );
+    setVerseTimings(nextTimings);
+    stateRef.current.verseTimings = nextTimings;
+
+    if (nextReciter.quranComId) {
+      fetchSurahVerseTimings(nextReciter, surah.number, verses).then(exact => {
+        if (exact && Object.keys(exact).length > 0) {
+          setVerseTimings(exact);
+          stateRef.current.verseTimings = exact;
+        }
+      }).catch(() => {});
     }
-  }, [verses, fromVerse]);
+
+    // 2. Play starting verse with next reciter
+    await playVerse(targetAyah, 1, nextReciter);
+    stateRef.current.isLoopingTransition = false;
+
+    // 3. Pre-fetch upcoming reciter after that
+    const afterNextIdx = (nextIndex + 1) % BASE_RECITERS.length;
+    prefetchVerseRange(BASE_RECITERS[afterNextIdx], surah.number, fromVerse, toVerse);
+  };
 
   // 3. Handle completion for TIMED continuous reciters
   const handleTimedVerseFinished = async () => {
@@ -452,16 +516,26 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     setVersePlayCount(1);
 
     if (settings.mode === 'single') {
-      const timing = timings[curr];
-      if (timing) await seekAudio(timing.startMs);
-      await resumeAudio();
-    } else if (settings.mode === 'range') {
-      if (curr >= to) {
-        setCurrentVerseNum(from);
-        animateVerseChange();
-        const timing = timings[from];
+      if (isMultipleMode) {
+        await advanceToNextReciterAndLoop(curr);
+      } else {
+        const timing = timings[curr];
         if (timing) await seekAudio(timing.startMs);
         await resumeAudio();
+        stateRef.current.isLoopingTransition = false;
+      }
+    } else if (settings.mode === 'range') {
+      if (curr >= to) {
+        if (isMultipleMode) {
+          await advanceToNextReciterAndLoop(from);
+        } else {
+          setCurrentVerseNum(from);
+          animateVerseChange();
+          const timing = timings[from];
+          if (timing) await seekAudio(timing.startMs);
+          await resumeAudio();
+          stateRef.current.isLoopingTransition = false;
+        }
       } else {
         const nextAyah = curr + 1;
         setCurrentVerseNum(nextAyah);
@@ -469,13 +543,13 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         const timing = timings[nextAyah];
         if (timing) await seekAudio(timing.startMs);
         await resumeAudio();
+        stateRef.current.isLoopingTransition = false;
       }
     } else {
       await pauseAudio();
       setIsPlaying(false);
+      stateRef.current.isLoopingTransition = false;
     }
-
-    stateRef.current.isLoopingTransition = false;
   };
 
   // 4. Handle completion for DISCRETE verse-by-verse reciters
@@ -500,7 +574,11 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     }
 
     if (settings.mode === 'single') {
-      playVerse(curr, 1);
+      if (isMultipleMode) {
+        await advanceToNextReciterAndLoop(curr);
+      } else {
+        playVerse(curr, 1);
+      }
       return;
     }
 
@@ -511,7 +589,11 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         try {
           await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         } catch (e) {}
-        playVerse(from, 1);
+        if (isMultipleMode) {
+          await advanceToNextReciterAndLoop(from);
+        } else {
+          playVerse(from, 1);
+        }
       } else {
         setIsPlaying(false);
       }
@@ -533,7 +615,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     updateCarPlayState({
       currentSurah: surah,
       currentVerseNum,
-      reciter,
+      reciter: currentEffectiveReciter,
       isPlaying,
     });
 
@@ -542,9 +624,10 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         isPlaying,
         currentVerseNum,
         togglePlayPause: handleTogglePlayPause,
+        currentReciterName: currentEffectiveReciter.shortName,
       });
     }
-  }, [isPlaying, currentVerseNum, surah, reciter, onPlaybackStateChange]);
+  }, [isPlaying, currentVerseNum, surah, currentEffectiveReciter, onPlaybackStateChange]);
 
   const handleSeekingChange = useCallback((isSeeking: boolean) => {
     isUserScrubbingRef.current = isSeeking;
@@ -571,7 +654,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         }
       } else {
         if (targetAyah !== stateRef.current.currentVerseNum) {
-          await playVerse(targetAyah, 1);
+          await playVerse(targetAyah, 1, currentEffectiveReciter);
           if (seekFraction > 0) {
             const dur = currentVerseDurationMillis > 1 ? currentVerseDurationMillis : 10000;
             const seekPosMs = Math.round(seekFraction * dur);
@@ -586,7 +669,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         }
       }
     },
-    [isTimedReciter, animateVerseChange, playVerse, currentVerseDurationMillis]
+    [isTimedReciter, animateVerseChange, playVerse, currentVerseDurationMillis, currentEffectiveReciter]
   );
 
   const handlePreviousVerse = async () => {
@@ -601,7 +684,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       const timing = stateRef.current.verseTimings[prevAyah];
       if (timing) await seekAudio(timing.startMs);
     } else {
-      playVerse(prevAyah, 1);
+      playVerse(prevAyah, 1, currentEffectiveReciter);
     }
   };
 
@@ -617,7 +700,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       const timing = stateRef.current.verseTimings[nextAyah];
       if (timing) await seekAudio(timing.startMs);
     } else {
-      playVerse(nextAyah, 1);
+      playVerse(nextAyah, 1, currentEffectiveReciter);
     }
   };
 
@@ -661,7 +744,15 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       <View style={styles.titleSection}>
         <Text style={styles.surahTitle}>Surah {surah.englishName}</Text>
         <View style={styles.subtitleRow}>
-          <Text style={styles.surahSubtitle}>{reciter.name}</Text>
+          {isMultipleMode && (
+            <View style={styles.multipleModeBadge}>
+              <Ionicons name="repeat" size={12} color="#e5b869" style={{ marginRight: 4 }} />
+              <Text style={styles.multipleModeText}>Multiple</Text>
+            </View>
+          )}
+          <Text style={styles.surahSubtitle}>
+            {isMultipleMode ? currentEffectiveReciter.name : reciter.name}
+          </Text>
           <SoundwaveVisualizer isPlaying={isPlaying} color="#9bbfff" barCount={4} maxHeight={14} />
         </View>
       </View>
@@ -857,6 +948,23 @@ const styles = StyleSheet.create({
   surahSubtitle: {
     fontSize: 13,
     color: '#8a95aa',
+  },
+  multipleModeBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#272010',
+    borderWidth: 1,
+    borderColor: '#6b5424',
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 8,
+    marginRight: 2,
+  },
+  multipleModeText: {
+    color: '#e5b869',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.3,
   },
   cardWrapper: {
     flex: 1,
