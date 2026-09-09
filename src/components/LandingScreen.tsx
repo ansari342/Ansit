@@ -409,7 +409,7 @@ export const LandingScreen: React.FC<LandingScreenProps> = ({
 
 const styles = StyleSheet.create({
   container: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: '#050811',
     zIndex: 9999,
     justifyContent: 'space-between',
@@ -417,7 +417,7 @@ const styles = StyleSheet.create({
     paddingVertical: height * 0.08,
   },
   ambientBackground: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',

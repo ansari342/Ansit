@@ -38,7 +38,7 @@ export const InlineWheelPicker: React.FC<InlineWheelPickerProps> = ({
   const lastIndexRef = useRef<number>(value - min);
   const isScrollingRef = useRef<boolean>(false);
   const lastHapticTimeRef = useRef<number>(0);
-  const stepIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const stepIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const valueRef = useRef<number>(value);
   valueRef.current = value;
 

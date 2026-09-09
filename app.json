@@ -14,7 +14,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.ahsanansari.ansit",
-      "buildNumber": "3",
+      "buildNumber": "4",
       "infoPlist": {
         "UIBackgroundModes": [
           "audio"
@@ -51,7 +51,8 @@
             "./assets/fonts/AmiriQuran.ttf"
           ]
         }
-      ]
+      ],
+      "expo-status-bar"
     ]
   }
 }
