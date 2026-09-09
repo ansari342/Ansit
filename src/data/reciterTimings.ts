@@ -1,4 +1,6 @@
 import { Verse } from '../types';
+import { CANONICAL_VERSE_PACING } from './canonicalVersePacing';
+import { RAAD_SURAH_DURATIONS_MS } from './raadDurations';
 
 export interface AyahTiming {
   startMs: number;
@@ -235,17 +237,57 @@ export function getSurahVerseTimings(
     return RECITER_TIMINGS[reciterId][surahNumber];
   }
 
-  // 2. Dynamic acoustic-phonetic alignment
   const result: Record<number, AyahTiming> = {};
-  if (!verses || verses.length === 0 || totalDurationMs <= 1000) {
+  if (!verses || verses.length === 0) {
     return result;
   }
 
-  // Opening Bismillah / Ta'awwudh offset
-  const bismillahMs = surahNumber === 9 ? 0 : 4200;
-  const effectiveDuration = Math.max(1000, totalDurationMs - bismillahMs);
+  // 2. Resolve true track duration
+  let trueDuration = totalDurationMs;
+  if (reciterId === 'raad' && (totalDurationMs <= 1000 || totalDurationMs === 180000)) {
+    trueDuration = RAAD_SURAH_DURATIONS_MS[surahNumber] || totalDurationMs;
+  }
+  if (trueDuration <= 1000) {
+    trueDuration = 180000;
+  }
 
-  // Phonetic weights per verse
+  // 3. Opening Bismillah / Ta'awwudh offset
+  // Surah 1: Ayah 1 is Bismillah, preceded by 4.2s Ta'awwudh
+  // Surah 9: No Bismillah (starts at 0ms)
+  // Surahs 2-8, 10-114: Raad recites melodic Bismillah taking ~5.2s
+  let bismillahMs = 5200;
+  if (surahNumber === 1) {
+    bismillahMs = 4200;
+  } else if (surahNumber === 9) {
+    bismillahMs = 0;
+  }
+
+  // 4. Canonical Tajweed pacing alignment (6,236 ayah precision curve)
+  const canonicalRatios = CANONICAL_VERSE_PACING[surahNumber];
+  if (canonicalRatios && canonicalRatios.length === verses.length) {
+    const effectiveDuration = Math.max(1000, trueDuration - bismillahMs);
+    let currentStart = bismillahMs;
+
+    for (let i = 0; i < verses.length; i++) {
+      const ayahNum = verses[i].numberInSurah;
+      const endMs =
+        i === verses.length - 1
+          ? trueDuration
+          : Math.round(bismillahMs + canonicalRatios[i] * effectiveDuration);
+
+      result[ayahNum] = {
+        startMs: currentStart,
+        endMs: Math.max(currentStart + 200, endMs),
+      };
+
+      currentStart = result[ayahNum].endMs;
+    }
+
+    return result;
+  }
+
+  // 5. Secondary fallback: acoustic-phonetic weighting
+  const effectiveDuration = Math.max(1000, trueDuration - bismillahMs);
   const verseWeights = verses.map(v => {
     const text = v.arabicText || '';
     const wordCount = Math.max(1, text.split(/\s+/).length);
@@ -254,7 +296,6 @@ export function getSurahVerseTimings(
   });
 
   const totalWeight = verseWeights.reduce((sum, w) => sum + w, 0) || 1;
-
   let currentCursor = bismillahMs;
 
   for (let i = 0; i < verses.length; i++) {
@@ -263,15 +304,15 @@ export function getSurahVerseTimings(
     const startMs = Math.round(currentCursor);
     const endMs =
       i === verses.length - 1
-        ? totalDurationMs
+        ? trueDuration
         : Math.round(currentCursor + durationForVerse);
 
     result[ayahNum] = {
       startMs,
-      endMs,
+      endMs: Math.max(startMs + 200, endMs),
     };
 
-    currentCursor = endMs; // Contiguous: end of current is start of next!
+    currentCursor = result[ayahNum].endMs;
   }
 
   return result;

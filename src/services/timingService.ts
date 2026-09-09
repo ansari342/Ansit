@@ -6,6 +6,7 @@ import {
   getSurahVerseTimings,
 } from '../data/reciterTimings';
 import { BASE_RECITERS } from '../data/reciters';
+import { RAAD_SURAH_DURATIONS_MS } from '../data/raadDurations';
 
 // High-speed in-memory cache for 0ms lookups during playback
 const memoryTimingsCache = new Map<string, Record<number, AyahTiming>>();
@@ -20,7 +21,7 @@ const STORAGE_PREFIX = '@ayah_timings_v2_';
  * Returns instantaneous timings synchronously:
  * 1. Memory cache
  * 2. Pre-bundled high precision timings in RECITER_TIMINGS
- * 3. Acoustic-phonetic alignment fallback
+ * 3. Canonical Tajweed pacing with verified audio duration
  */
 export function getInstantTimings(
   reciter: Reciter,
@@ -40,7 +41,14 @@ export function getInstantTimings(
     return bundled;
   }
 
-  return getSurahVerseTimings(actualReciter.id, surahNumber, verses, totalDurationMs);
+  let durationToUse = totalDurationMs;
+  if (actualReciter.id === 'raad' && (totalDurationMs === 180000 || totalDurationMs <= 1000)) {
+    durationToUse = RAAD_SURAH_DURATIONS_MS[surahNumber] || totalDurationMs;
+  }
+
+  const timings = getSurahVerseTimings(actualReciter.id, surahNumber, verses, durationToUse);
+  memoryTimingsCache.set(key, timings);
+  return timings;
 }
 
 /**
@@ -62,8 +70,8 @@ export async function fetchSurahVerseTimings(
   }
 
   // 2. Check bundled tables
-  if (RECITER_TIMINGS[reciter.id]?.[surahNumber]) {
-    const bundled = RECITER_TIMINGS[reciter.id][surahNumber];
+  if (RECITER_TIMINGS[actualReciter.id]?.[surahNumber]) {
+    const bundled = RECITER_TIMINGS[actualReciter.id][surahNumber];
     memoryTimingsCache.set(key, bundled);
     return bundled;
   }
@@ -83,9 +91,9 @@ export async function fetchSurahVerseTimings(
   }
 
   // 4. Fetch live verse timestamps from Quran.com API
-  if (reciter.quranComId) {
+  if (actualReciter.quranComId) {
     try {
-      const apiUrl = `https://api.quran.com/api/v4/chapter_recitations/${reciter.quranComId}/${surahNumber}?segments=true`;
+      const apiUrl = `https://api.quran.com/api/v4/chapter_recitations/${actualReciter.quranComId}/${surahNumber}?segments=true`;
       const res = await fetch(apiUrl);
       if (res.ok) {
         const data = await res.json();
