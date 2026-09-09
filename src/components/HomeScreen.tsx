@@ -26,6 +26,12 @@ import {
   addRecentlyPlayed,
   removeRecentlyPlayed,
 } from '../services/historyService';
+import {
+  saveLastSession,
+  getLastSession,
+  saveSurahRanges,
+  getSurahRanges,
+} from '../services/sessionStorage';
 
 interface HomeScreenProps {
   onStartPlayback: (
@@ -35,17 +41,35 @@ interface HomeScreenProps {
     reciter: Reciter
   ) => void;
   onOpenSettings: () => void;
+  activeSession?: {
+    surah: Surah;
+    fromVerse: number;
+    toVerse: number;
+    reciter: Reciter;
+  };
+  onSelectionChange?: (
+    surah: Surah,
+    fromVerse: number,
+    toVerse: number,
+    reciter: Reciter
+  ) => void;
 }
 
 export const HomeScreen: React.FC<HomeScreenProps> = ({
   onStartPlayback,
   onOpenSettings,
+  activeSession,
+  onSelectionChange,
 }) => {
-  const defaultSurah = SURAHS.find(s => s.number === 1) || SURAHS[0];
+  const defaultSurah = activeSession?.surah || SURAHS.find(s => s.number === 1) || SURAHS[0];
   const [selectedSurah, setSelectedSurah] = useState<Surah>(defaultSurah);
-  const [selectedReciter, setSelectedReciter] = useState<Reciter>(RECITERS[0]);
-  const [fromVerse, setFromVerse] = useState<number>(1);
-  const [toVerse, setToVerse] = useState<number>(defaultSurah.numberOfAyahs);
+  const [selectedReciter, setSelectedReciter] = useState<Reciter>(
+    activeSession?.reciter || RECITERS[0]
+  );
+  const [fromVerse, setFromVerse] = useState<number>(activeSession?.fromVerse || 1);
+  const [toVerse, setToVerse] = useState<number>(
+    activeSession?.toVerse || defaultSurah.numberOfAyahs
+  );
 
   const [recentlyPlayedList, setRecentlyPlayedList] = useState<HistoryItem[]>([]);
   const [surahPickerVisible, setSurahPickerVisible] = useState(false);
@@ -55,60 +79,134 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
 
   // Smart Per-Surah Verse Memory: remembers the custom verse range selected for each surah
   const [surahRanges, setSurahRanges] = useState<Record<number, { from: number; to: number }>>({
-    [defaultSurah.number]: { from: 1, to: defaultSurah.numberOfAyahs },
+    [defaultSurah.number]: { from: fromVerse, to: toVerse },
   });
 
-  // Load recently played and seed per-surah range memory
-  const loadHistory = async () => {
-    const list = await getRecentlyPlayed();
-    setRecentlyPlayedList(list);
-    if (list && list.length > 0) {
-      setSurahRanges(prev => {
-        const updated = { ...prev };
+  const lastActiveSessionKey = useRef<string>(
+    activeSession
+      ? `${activeSession.surah.number}_${activeSession.fromVerse}_${activeSession.toVerse}_${activeSession.reciter.id}`
+      : ''
+  );
+
+  // Load saved session, custom per-surah ranges, and recently played on mount
+  const loadSavedState = async () => {
+    try {
+      const [savedRanges, savedSession, list] = await Promise.all([
+        getSurahRanges(),
+        getLastSession(),
+        getRecentlyPlayed(),
+      ]);
+
+      setRecentlyPlayedList(list || []);
+
+      const mergedRanges: Record<number, { from: number; to: number }> = {
+        ...savedRanges,
+      };
+      if (list && list.length > 0) {
         for (const item of list) {
-          if (!updated[item.surahNumber]) {
-            updated[item.surahNumber] = { from: item.fromVerse, to: item.toVerse };
+          if (!mergedRanges[item.surahNumber]) {
+            mergedRanges[item.surahNumber] = {
+              from: item.fromVerse,
+              to: item.toVerse,
+            };
           }
         }
-        return updated;
-      });
+      }
+
+      // If activeSession is not passed yet, restore from savedSession
+      const sessionToApply = activeSession || (savedSession ? {
+        surah: SURAHS.find(s => s.number === savedSession.surahNumber) || defaultSurah,
+        fromVerse: savedSession.fromVerse,
+        toVerse: savedSession.toVerse,
+        reciter: RECITERS.find(r => r.id === savedSession.reciterId) || RECITERS[0],
+      } : null);
+
+      if (sessionToApply) {
+        const safeFrom = Math.max(
+          1,
+          Math.min(sessionToApply.fromVerse, sessionToApply.surah.numberOfAyahs)
+        );
+        const safeTo = Math.max(
+          safeFrom,
+          Math.min(sessionToApply.toVerse, sessionToApply.surah.numberOfAyahs)
+        );
+
+        setSelectedSurah(sessionToApply.surah);
+        setFromVerse(safeFrom);
+        setToVerse(safeTo);
+        setSelectedReciter(sessionToApply.reciter);
+
+        mergedRanges[sessionToApply.surah.number] = { from: safeFrom, to: safeTo };
+        lastActiveSessionKey.current = `${sessionToApply.surah.number}_${safeFrom}_${safeTo}_${sessionToApply.reciter.id}`;
+      }
+
+      setSurahRanges(mergedRanges);
+    } catch (e) {
+      console.warn('Failed to load saved state in HomeScreen:', e);
     }
   };
 
   useEffect(() => {
-    loadHistory();
+    loadSavedState();
   }, []);
+
+  // Synchronize when activeSession updates externally (e.g. paused/minimized from player or played from LandingScreen)
+  useEffect(() => {
+    if (activeSession) {
+      const key = `${activeSession.surah.number}_${activeSession.fromVerse}_${activeSession.toVerse}_${activeSession.reciter.id}`;
+      if (lastActiveSessionKey.current !== key) {
+        lastActiveSessionKey.current = key;
+        const safeFrom = Math.max(
+          1,
+          Math.min(activeSession.fromVerse, activeSession.surah.numberOfAyahs)
+        );
+        const safeTo = Math.max(
+          safeFrom,
+          Math.min(activeSession.toVerse, activeSession.surah.numberOfAyahs)
+        );
+        setSelectedSurah(activeSession.surah);
+        setFromVerse(safeFrom);
+        setToVerse(safeTo);
+        setSelectedReciter(activeSession.reciter);
+        setSurahRanges(prev => ({
+          ...prev,
+          [activeSession.surah.number]: { from: safeFrom, to: safeTo },
+        }));
+      }
+    }
+  }, [activeSession]);
 
   const handleSelectSurah = (surah: Surah) => {
     setSelectedSurah(surah);
     // Smart default: If user previously selected or played a range for this surah, default to it!
     const saved = surahRanges[surah.number];
+    let targetFrom = 1;
+    let targetTo = surah.numberOfAyahs;
+
     if (saved) {
-      const safeFrom = Math.max(1, Math.min(saved.from, surah.numberOfAyahs));
-      const safeTo = Math.max(safeFrom, Math.min(saved.to, surah.numberOfAyahs));
-      setFromVerse(safeFrom);
-      setToVerse(safeTo);
+      targetFrom = Math.max(1, Math.min(saved.from, surah.numberOfAyahs));
+      targetTo = Math.max(targetFrom, Math.min(saved.to, surah.numberOfAyahs));
     } else {
       const inRecent = recentlyPlayedList.find(item => item.surahNumber === surah.number);
       if (inRecent) {
-        const safeFrom = Math.max(1, Math.min(inRecent.fromVerse, surah.numberOfAyahs));
-        const safeTo = Math.max(safeFrom, Math.min(inRecent.toVerse, surah.numberOfAyahs));
-        setFromVerse(safeFrom);
-        setToVerse(safeTo);
-        setSurahRanges(prev => ({
-          ...prev,
-          [surah.number]: { from: safeFrom, to: safeTo },
-        }));
-      } else {
-        // Default: 1 to the end of the surah
-        setFromVerse(1);
-        setToVerse(surah.numberOfAyahs);
-        setSurahRanges(prev => ({
-          ...prev,
-          [surah.number]: { from: 1, to: surah.numberOfAyahs },
-        }));
+        targetFrom = Math.max(1, Math.min(inRecent.fromVerse, surah.numberOfAyahs));
+        targetTo = Math.max(targetFrom, Math.min(inRecent.toVerse, surah.numberOfAyahs));
       }
     }
+
+    setFromVerse(targetFrom);
+    setToVerse(targetTo);
+
+    const updatedRanges = {
+      ...surahRanges,
+      [surah.number]: { from: targetFrom, to: targetTo },
+    };
+    setSurahRanges(updatedRanges);
+    saveSurahRanges(updatedRanges);
+
+    lastActiveSessionKey.current = `${surah.number}_${targetFrom}_${targetTo}_${selectedReciter.id}`;
+    saveLastSession(surah.number, targetFrom, targetTo, selectedReciter.id);
+    onSelectionChange?.(surah, targetFrom, targetTo, selectedReciter);
   };
 
   const handleFromWheelChange = useCallback(
@@ -118,12 +216,20 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       if (newFrom > toVerse) {
         setToVerse(newFrom);
       }
-      setSurahRanges(prev => ({
-        ...prev,
-        [selectedSurah.number]: { from: newFrom, to: targetTo },
-      }));
+      setSurahRanges(prev => {
+        const updated = {
+          ...prev,
+          [selectedSurah.number]: { from: newFrom, to: targetTo },
+        };
+        saveSurahRanges(updated);
+        return updated;
+      });
+
+      lastActiveSessionKey.current = `${selectedSurah.number}_${newFrom}_${targetTo}_${selectedReciter.id}`;
+      saveLastSession(selectedSurah.number, newFrom, targetTo, selectedReciter.id);
+      onSelectionChange?.(selectedSurah, newFrom, targetTo, selectedReciter);
     },
-    [toVerse, selectedSurah.number]
+    [toVerse, selectedSurah, selectedReciter, onSelectionChange]
   );
 
   const handleToWheelChange = useCallback(
@@ -133,13 +239,28 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       if (newTo < fromVerse) {
         setFromVerse(newTo);
       }
-      setSurahRanges(prev => ({
-        ...prev,
-        [selectedSurah.number]: { from: targetFrom, to: newTo },
-      }));
+      setSurahRanges(prev => {
+        const updated = {
+          ...prev,
+          [selectedSurah.number]: { from: targetFrom, to: newTo },
+        };
+        saveSurahRanges(updated);
+        return updated;
+      });
+
+      lastActiveSessionKey.current = `${selectedSurah.number}_${targetFrom}_${newTo}_${selectedReciter.id}`;
+      saveLastSession(selectedSurah.number, targetFrom, newTo, selectedReciter.id);
+      onSelectionChange?.(selectedSurah, targetFrom, newTo, selectedReciter);
     },
-    [fromVerse, selectedSurah.number]
+    [fromVerse, selectedSurah, selectedReciter, onSelectionChange]
   );
+
+  const handleSelectReciter = (reciter: Reciter) => {
+    setSelectedReciter(reciter);
+    lastActiveSessionKey.current = `${selectedSurah.number}_${fromVerse}_${toVerse}_${reciter.id}`;
+    saveLastSession(selectedSurah.number, fromVerse, toVerse, reciter.id);
+    onSelectionChange?.(selectedSurah, fromVerse, toVerse, reciter);
+  };
 
   const handlePlaySession = async (
     surah: Surah,
@@ -151,10 +272,16 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     } catch (e) {}
 
-    setSurahRanges(prev => ({
-      ...prev,
+    const updatedRanges = {
+      ...surahRanges,
       [surah.number]: { from, to },
-    }));
+    };
+    setSurahRanges(updatedRanges);
+    saveSurahRanges(updatedRanges);
+
+    lastActiveSessionKey.current = `${surah.number}_${from}_${to}_${reciter.id}`;
+    saveLastSession(surah.number, from, to, reciter.id);
+    onSelectionChange?.(surah, from, to, reciter);
 
     const updated = await addRecentlyPlayed(surah, from, to, reciter);
     if (updated.length > 0) {
@@ -174,6 +301,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       setSelectedSurah(surah);
       setFromVerse(item.fromVerse);
       setToVerse(item.toVerse);
+      setSelectedReciter(reciter);
       setSurahRanges(prev => ({
         ...prev,
         [surah.number]: { from: item.fromVerse, to: item.toVerse },
@@ -325,7 +453,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                   styles.reciterChip,
                   isSelected && styles.reciterChipActive,
                 ]}
-                onPress={() => setSelectedReciter(r)}
+                onPress={() => handleSelectReciter(r)}
               >
                 <Text
                   style={[
@@ -432,7 +560,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       <ReciterPickerModal
         visible={reciterPickerVisible}
         selectedReciter={selectedReciter}
-        onSelect={setSelectedReciter}
+        onSelect={handleSelectReciter}
         onClose={() => setReciterPickerVisible(false)}
       />
 
@@ -443,6 +571,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         onPlayTopSession={(surahNum, fromV, toV) => {
           const targetSurah = SURAHS.find(s => s.number === surahNum);
           if (targetSurah) {
+            setSelectedSurah(targetSurah);
+            setFromVerse(fromV);
+            setToVerse(toV);
             handlePlaySession(targetSurah, fromV, toV, selectedReciter);
           }
         }}

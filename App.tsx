@@ -14,20 +14,16 @@ import { SoundwaveVisualizer } from './src/components/SoundwaveVisualizer';
 import { BouncyTouchable } from './src/components/BouncyTouchable';
 import { LandingScreen } from './src/components/LandingScreen';
 import { HistoryItem, getRecentlyPlayed } from './src/services/historyService';
+import {
+  saveLastSession,
+  getLastSession,
+} from './src/services/sessionStorage';
 
 export default function App() {
   const [showLanding, setShowLanding] = useState<boolean>(true);
   const [mostRecentHistoryItem, setMostRecentHistoryItem] = useState<HistoryItem | null>(null);
   const [currentScreen, setCurrentScreen] = useState<'home' | 'nowPlaying'>('home');
-
-  useEffect(() => {
-    initAudioMode();
-    getRecentlyPlayed().then(list => {
-      if (list && list.length > 0) {
-        setMostRecentHistoryItem(list[0]);
-      }
-    });
-  }, []);
+  const [sessionLoaded, setSessionLoaded] = useState<boolean>(false);
 
   const initialSurah = SURAHS.find(s => s.number === 1) || SURAHS[0];
   const [session, setSession] = useState<{
@@ -41,6 +37,50 @@ export default function App() {
     toVerse: initialSurah.numberOfAyahs,
     reciter: RECITERS[0],
   });
+
+  useEffect(() => {
+    initAudioMode();
+
+    // 1. Load recently played list
+    getRecentlyPlayed().then(list => {
+      if (list && list.length > 0) {
+        setMostRecentHistoryItem(list[0]);
+      }
+    });
+
+    // 2. Load last selected session
+    getLastSession().then(saved => {
+      if (saved) {
+        const surah = SURAHS.find(s => s.number === saved.surahNumber);
+        const reciter = RECITERS.find(r => r.id === saved.reciterId) || RECITERS[0];
+        if (surah) {
+          const safeFrom = Math.max(1, Math.min(saved.fromVerse, surah.numberOfAyahs));
+          const safeTo = Math.max(safeFrom, Math.min(saved.toVerse, surah.numberOfAyahs));
+          const restoredSession = {
+            surah,
+            fromVerse: safeFrom,
+            toVerse: safeTo,
+            reciter,
+          };
+          setSession(restoredSession);
+
+          // Seed LandingScreen suggestion with the restored session
+          setMostRecentHistoryItem({
+            id: `${surah.number}_${safeFrom}_${safeTo}_${reciter.id}`,
+            surahNumber: surah.number,
+            surahName: surah.englishName,
+            surahArabicName: surah.name,
+            fromVerse: safeFrom,
+            toVerse: safeTo,
+            reciterId: reciter.id,
+            reciterName: reciter.shortName,
+            timestamp: saved.timestamp || Date.now(),
+          });
+        }
+      }
+      setSessionLoaded(true);
+    });
+  }, []);
 
   const [hasStartedPlaying, setHasStartedPlaying] = useState<boolean>(false);
 
@@ -69,12 +109,14 @@ export default function App() {
     toVerse: number,
     reciter: Reciter
   ) => {
-    setSession({
+    const newSession = {
       surah,
       fromVerse,
       toVerse,
       reciter,
-    });
+    };
+    setSession(newSession);
+    saveLastSession(surah.number, fromVerse, toVerse, reciter.id);
     setHasStartedPlaying(true);
     setCurrentScreen('nowPlaying');
   };
@@ -108,6 +150,10 @@ export default function App() {
         <HomeScreen
           onStartPlayback={handleStartPlayback}
           onOpenSettings={() => setSettingsModalVisible(true)}
+          activeSession={sessionLoaded ? session : undefined}
+          onSelectionChange={(surah, fromVerse, toVerse, reciter) => {
+            setSession({ surah, fromVerse, toVerse, reciter });
+          }}
         />
 
         {/* MINIMIZED PLAYER BAR ON HOME SCREEN */}
