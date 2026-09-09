@@ -23,6 +23,8 @@ export interface Reciter {
   isSurahBased?: boolean;
   baseUrl?: string;
   badge?: string;
+  quranComId?: number;
+  surahUrlPattern?: string;
 }
 
 export type LoopMode = 'range' | 'single' | 'off';

@@ -46,6 +46,16 @@ export async function getOrDownloadVerseAudio(
   }
 
   const remoteUrl = getAudioUrl(reciter, surah, ayah);
+
+  if (reciter.isSurahBased) {
+    // For surah-based continuous audio, stream immediately so playback starts with zero delay,
+    // and download in background to populate local cache for subsequent listens.
+    FileSystem.downloadAsync(remoteUrl, localUri).catch(err => {
+      console.warn(`Background surah cache download warning for ${remoteUrl}:`, err);
+    });
+    return remoteUrl;
+  }
+
   try {
     const result = await FileSystem.downloadAsync(remoteUrl, localUri);
     if (result.status === 200) {

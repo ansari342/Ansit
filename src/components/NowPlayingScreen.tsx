@@ -26,8 +26,13 @@ import { prefetchVerseRange } from '../services/cacheService';
 import { LoopSettingsModal } from './LoopSettingsModal';
 import {
   AyahTiming,
+  RECITER_TIMINGS,
   getSurahVerseTimings,
 } from '../data/reciterTimings';
+import {
+  getInstantTimings,
+  fetchSurahVerseTimings,
+} from '../services/timingService';
 import { SoundwaveVisualizer } from './SoundwaveVisualizer';
 import { BouncyTouchable } from './BouncyTouchable';
 import { SegmentedPlaybackBar } from './SegmentedPlaybackBar';
@@ -178,13 +183,30 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       const loaded = await getVersesForSurah(surah.number);
       if (isMounted) {
         setVerses(loaded);
-        const initialTimings = getSurahVerseTimings(
-          reciter.id,
+        const initialTimings = getInstantTimings(
+          reciter,
           surah.number,
           loaded,
           durationMillis > 1000 ? durationMillis : 180000
         );
         setVerseTimings(initialTimings);
+        stateRef.current.verseTimings = initialTimings;
+
+        if (reciter.quranComId) {
+          fetchSurahVerseTimings(
+            reciter,
+            surah.number,
+            loaded,
+            durationMillis
+          )
+            .then(exactTimings => {
+              if (isMounted && exactTimings && Object.keys(exactTimings).length > 0) {
+                setVerseTimings(exactTimings);
+                stateRef.current.verseTimings = exactTimings;
+              }
+            })
+            .catch(() => {});
+        }
       }
     })();
 
@@ -192,23 +214,25 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       isMounted = false;
       stopAndUnloadAudio();
     };
-  }, [surah.number, reciter.id, fromVerse, toVerse]);
+  }, [surah.number, reciter, fromVerse, toVerse]);
 
   // Re-calculate precise verse timings whenever audio duration is loaded
   const updateTimingsWithDuration = useCallback(
     (totalDurMs: number) => {
       if (totalDurMs > 1000 && verses.length > 0) {
-        const timings = getSurahVerseTimings(
-          reciter.id,
-          surah.number,
-          verses,
-          totalDurMs
-        );
-        setVerseTimings(timings);
-        stateRef.current.verseTimings = timings;
+        if (!reciter.quranComId && !RECITER_TIMINGS[reciter.id]?.[surah.number]) {
+          const timings = getSurahVerseTimings(
+            reciter.id,
+            surah.number,
+            verses,
+            totalDurMs
+          );
+          setVerseTimings(timings);
+          stateRef.current.verseTimings = timings;
+        }
       }
     },
-    [reciter.id, surah.number, verses]
+    [reciter.id, reciter.quranComId, surah.number, verses]
   );
 
   // Determine upcoming ayah for discrete reciters
@@ -237,7 +261,11 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       animateVerseChange();
 
       if (isTimedReciter) {
-        const timing = stateRef.current.verseTimings[ayahNum];
+        let timing = stateRef.current.verseTimings[ayahNum];
+        if (!timing) {
+          const instant = getInstantTimings(reciter, surah.number, verses, durationMillis);
+          timing = instant[ayahNum];
+        }
         const startSeekMs = timing?.startMs || 0;
         if (timing) {
           setCurrentVerseDurationMillis(Math.max(1, timing.endMs - timing.startMs));
@@ -278,7 +306,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
               }
             }
 
-            // Contiguous boundary check
+            // Contiguous boundary check: smoothly updates current verse as audio plays gaplessly
             for (let a = from; a <= to; a++) {
               const t = timings[a];
               if (t && pos >= t.startMs && pos < t.endMs) {
@@ -293,16 +321,28 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
               }
             }
 
-            // Boundary checking for loops
-            if (settings.mode === 'single') {
+            // Boundary checking for loops:
+            // When verseRepeatCount === 1 and mode === 'range', audio flows naturally without interruption!
+            if (settings.verseRepeatCount > 1) {
+              const currentTiming = timings[curr];
+              if (currentTiming && pos >= currentTiming.endMs - 120) {
+                handleTimedVerseFinished();
+              }
+            } else if (settings.mode === 'single') {
               const singleTiming = timings[curr];
-              if (singleTiming && pos >= singleTiming.endMs - 100) {
+              if (singleTiming && pos >= singleTiming.endMs - 120) {
                 handleTimedVerseFinished();
               }
             } else if (settings.mode === 'range') {
               const rangeEndTiming = timings[to];
-              if (rangeEndTiming && pos >= rangeEndTiming.endMs - 100) {
+              if (rangeEndTiming && pos >= rangeEndTiming.endMs - 120) {
                 handleTimedVerseFinished();
+              }
+            } else if (settings.mode === 'off') {
+              const rangeEndTiming = timings[to];
+              if (rangeEndTiming && pos >= rangeEndTiming.endMs - 120) {
+                pauseAudio();
+                setIsPlaying(false);
               }
             } else if (status.didJustFinish) {
               setIsPlaying(false);
@@ -313,7 +353,9 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         if (sound) {
           setIsPlaying(true);
           try {
-            await sound.setPositionAsync(startSeekMs);
+            if (startSeekMs > 0) {
+              await sound.setPositionAsync(startSeekMs);
+            }
           } catch (e) {}
         }
       } else {
@@ -380,6 +422,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     const {
       currentVerseNum: curr,
       fromVerse: from,
+      toVerse: to,
       loopSettings: settings,
       versePlayCount: count,
       verseTimings: timings,
@@ -405,18 +448,28 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       return;
     }
 
+    // Individual repeat count satisfied for this verse
+    setVersePlayCount(1);
+
     if (settings.mode === 'single') {
-      setVersePlayCount(1);
       const timing = timings[curr];
       if (timing) await seekAudio(timing.startMs);
       await resumeAudio();
     } else if (settings.mode === 'range') {
-      setVersePlayCount(1);
-      setCurrentVerseNum(from);
-      animateVerseChange();
-      const timing = timings[from];
-      if (timing) await seekAudio(timing.startMs);
-      await resumeAudio();
+      if (curr >= to) {
+        setCurrentVerseNum(from);
+        animateVerseChange();
+        const timing = timings[from];
+        if (timing) await seekAudio(timing.startMs);
+        await resumeAudio();
+      } else {
+        const nextAyah = curr + 1;
+        setCurrentVerseNum(nextAyah);
+        animateVerseChange();
+        const timing = timings[nextAyah];
+        if (timing) await seekAudio(timing.startMs);
+        await resumeAudio();
+      }
     } else {
       await pauseAudio();
       setIsPlaying(false);

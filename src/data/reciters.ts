@@ -6,6 +6,10 @@ export const RECITERS: Reciter[] = [
     name: 'Mishary Rashid Alafasy',
     shortName: 'Mishary Alafasy',
     subfolder: 'Alafasy_128kbps',
+    isSurahBased: true,
+    quranComId: 7,
+    surahUrlPattern: 'https://download.quranicaudio.com/qdc/mishari_al_afasy/murattal/{surah}.mp3',
+    badge: 'Seamless Studio',
   },
   {
     id: 'raad',
@@ -21,30 +25,48 @@ export const RECITERS: Reciter[] = [
     name: 'Abdul Basit Abdul Samad (Murattal)',
     shortName: 'Abdul Basit',
     subfolder: 'Abdul_Basit_Murattal_192kbps',
+    isSurahBased: true,
+    quranComId: 2,
+    surahUrlPattern: 'https://download.quranicaudio.com/qdc/abdul_baset/murattal/{surah}.mp3',
+    badge: 'Golden Voice',
   },
   {
     id: 'husary',
     name: 'Mahmoud Khalil Al-Husary',
     shortName: 'Al-Husary',
     subfolder: 'Husary_128kbps',
+    isSurahBased: true,
+    quranComId: 6,
+    surahUrlPattern: 'https://download.quranicaudio.com/qdc/khalil_al_husary/murattal/{surah}.mp3',
+    badge: 'Master of Tajweed',
   },
   {
     id: 'ghamdi',
     name: 'Saad Al-Ghamdi',
     shortName: 'Saad Al-Ghamdi',
     subfolder: 'Ghamadi_40kbps',
+    isSurahBased: true,
+    quranComId: 13,
+    surahUrlPattern: 'https://download.quranicaudio.com/quran/sa3d_al-ghaamidi/complete/{surah3}.mp3',
   },
   {
     id: 'sudais',
     name: 'Abdur-Rahman As-Sudais',
     shortName: 'As-Sudais',
     subfolder: 'Abdurrahmaan_As-Sudais_192kbps',
+    isSurahBased: true,
+    quranComId: 3,
+    surahUrlPattern: 'https://download.quranicaudio.com/qdc/abdurrahmaan_as_sudais/murattal/{surah}.mp3',
+    badge: 'Imam of Haram',
   },
   {
     id: 'shuraim',
     name: 'Saud Al-Shuraim',
     shortName: 'Al-Shuraim',
     subfolder: 'Saood_ash-Shuraym_128kbps',
+    isSurahBased: true,
+    quranComId: 10,
+    surahUrlPattern: 'https://download.quranicaudio.com/qdc/saud_ash-shuraym/murattal/{surah3}.mp3',
   },
   {
     id: 'muaiqly',
@@ -57,12 +79,20 @@ export const RECITERS: Reciter[] = [
     name: 'Yasser Al-Dosari',
     shortName: 'Al-Dosari',
     subfolder: 'Yasser_Ad-Dussary_128kbps',
+    isSurahBased: true,
+    quranComId: 97,
+    surahUrlPattern: 'https://download.quranicaudio.com/quran/yasser_ad-dussary/{surah3}.mp3',
+    badge: 'Melodic & Deep',
   },
   {
     id: 'minshawi',
     name: 'Muhammad Siddiq Al-Minshawi (Murattal)',
     shortName: 'Al-Minshawi',
     subfolder: 'Minshawy_Murattal_128kbps',
+    isSurahBased: true,
+    quranComId: 9,
+    surahUrlPattern: 'https://download.quranicaudio.com/qdc/siddiq_minshawi/murattal/{surah}.mp3',
+    badge: 'Reverent Murattal',
   },
   {
     id: 'minshawi_mujawwad',
@@ -75,18 +105,27 @@ export const RECITERS: Reciter[] = [
     name: 'Abdul Basit Abdul Samad (Mujawwad)',
     shortName: 'Basit (Mujawwad)',
     subfolder: 'Abdul_Basit_Mujawwad_128kbps',
+    isSurahBased: true,
+    quranComId: 1,
+    surahUrlPattern: 'https://download.quranicaudio.com/qdc/abdul_baset/mujawwad/{surah}.mp3',
   },
   {
     id: 'husary_muallim',
     name: 'Mahmoud Khalil Al-Husary (Muallim / Teaching)',
     shortName: 'Husary (Muallim)',
     subfolder: 'Husary_Muallim_128kbps',
+    isSurahBased: true,
+    quranComId: 12,
+    surahUrlPattern: 'https://download.quranicaudio.com/qdc/khalil_al_husary/muallim/{surah}.mp3',
   },
   {
     id: 'shatri',
     name: 'Abu Bakr Al-Shatri',
     shortName: 'Al-Shatri',
     subfolder: 'Abu_Bakr_Ash-Shaatree_128kbps',
+    isSurahBased: true,
+    quranComId: 4,
+    surahUrlPattern: 'https://download.quranicaudio.com/qdc/abu_bakr_shatri/murattal/{surah}.mp3',
   },
   {
     id: 'hudhaify',
@@ -99,6 +138,9 @@ export const RECITERS: Reciter[] = [
     name: 'Nasser Al-Qatami',
     shortName: 'Al-Qatami',
     subfolder: 'Nasser_Alqatami_128kbps',
+    isSurahBased: true,
+    quranComId: 104,
+    surahUrlPattern: 'https://download.quranicaudio.com/quran/nasser_bin_ali_alqatami/{surah3}.mp3',
   },
   {
     id: 'sowaid',
@@ -111,6 +153,11 @@ export const RECITERS: Reciter[] = [
 export function getAudioUrl(reciter: Reciter, surahNumber: number, ayahNumber: number): string {
   const surahStr = surahNumber.toString().padStart(3, '0');
   if (reciter.isSurahBased) {
+    if (reciter.surahUrlPattern) {
+      return reciter.surahUrlPattern
+        .replace('{surah}', surahNumber.toString())
+        .replace('{surah3}', surahStr);
+    }
     const base = reciter.baseUrl || 'https://server6.mp3quran.net/kurdi/';
     return `${base}${surahStr}.mp3`;
   }
