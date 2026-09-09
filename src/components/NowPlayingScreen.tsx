@@ -492,9 +492,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       verseTimings: timings,
     } = stateRef.current;
 
-    try {
-      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    } catch (e) {}
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
 
     if (settings.delayBetweenVersesSeconds > 0) {
       await pauseAudio();
@@ -586,9 +584,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       playVerse(curr + 1, 1);
     } else {
       if (settings.mode === 'range') {
-        try {
-          await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        } catch (e) {}
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
         if (isMultipleMode) {
           await advanceToNextReciterAndLoop(from);
         } else {

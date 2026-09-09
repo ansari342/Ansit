@@ -13,9 +13,9 @@ export async function initAudioMode(): Promise<void> {
       allowsRecordingIOS: false,
       staysActiveInBackground: true,
       playsInSilentModeIOS: true,
-      interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+      interruptionModeIOS: InterruptionModeIOS.DuckOthers,
       shouldDuckAndroid: true,
-      interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
+      interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
       playThroughEarpieceAndroid: false,
     });
     isAudioInitialized = true;
@@ -163,6 +163,7 @@ export async function pauseAudio(): Promise<void> {
 export async function resumeAudio(): Promise<void> {
   if (currentSound) {
     try {
+      await initAudioMode();
       await currentSound.playAsync();
     } catch (e) {}
   }

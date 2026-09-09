@@ -49,11 +49,8 @@ export async function getOrDownloadVerseAudio(
   const remoteUrl = getAudioUrl(reciter, surah, ayah);
 
   if (reciter.isSurahBased) {
-    // For surah-based continuous audio, stream immediately so playback starts with zero delay,
-    // and download in background to populate local cache for subsequent listens.
-    FileSystem.downloadAsync(remoteUrl, localUri).catch(err => {
-      console.warn(`Background surah cache download warning for ${remoteUrl}:`, err);
-    });
+    // For surah-based continuous audio, stream directly so AVPlayer has full bandwidth
+    // and doesn't compete with a concurrent download socket on cellular/CarPlay.
     return remoteUrl;
   }
 
