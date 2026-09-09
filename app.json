@@ -43,7 +43,15 @@
     },
     "owner": "ansari342",
     "plugins": [
-      "expo-font"
+      [
+        "expo-font",
+        {
+          "fonts": [
+            "./assets/fonts/UthmanicHafs.ttf",
+            "./assets/fonts/AmiriQuran.ttf"
+          ]
+        }
+      ]
     ]
   }
 }

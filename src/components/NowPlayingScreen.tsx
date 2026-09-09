@@ -1007,10 +1007,11 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   bismillahText: {
-    fontSize: 20,
+    fontFamily: 'UthmanicHafs',
+    fontSize: 22,
+    lineHeight: 40,
     color: '#e5b869',
     textAlign: 'center',
-    fontWeight: '600',
     letterSpacing: 0.5,
   },
   bismillahUnderline: {
@@ -1036,18 +1037,18 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   arabicText: {
-    fontSize: 27,
-    lineHeight: 52,
+    fontFamily: 'UthmanicHafs',
+    fontSize: 28,
+    lineHeight: 56,
     color: '#ffffff',
     textAlign: 'center',
-    fontWeight: '600',
     paddingHorizontal: 6,
     marginBottom: 16,
   },
   ayahEndSymbol: {
+    fontFamily: 'UthmanicHafs',
     color: '#9bbfff',
     fontSize: 22,
-    fontWeight: '700',
   },
   cardDivider: {
     width: 44,

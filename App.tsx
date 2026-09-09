@@ -3,6 +3,7 @@ import { View, StyleSheet, TouchableOpacity, Text } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
+import { useFonts } from 'expo-font';
 import { HomeScreen } from './src/components/HomeScreen';
 import { NowPlayingScreen } from './src/components/NowPlayingScreen';
 import { LoopSettingsModal } from './src/components/LoopSettingsModal';
@@ -20,6 +21,11 @@ import {
 } from './src/services/sessionStorage';
 
 export default function App() {
+  const [fontsLoaded] = useFonts({
+    'UthmanicHafs': require('./assets/fonts/UthmanicHafs.ttf'),
+    'AmiriQuran': require('./assets/fonts/AmiriQuran.ttf'),
+  });
+
   const [showLanding, setShowLanding] = useState<boolean>(true);
   const [mostRecentHistoryItem, setMostRecentHistoryItem] = useState<HistoryItem | null>(null);
   const [currentScreen, setCurrentScreen] = useState<'home' | 'nowPlaying'>('home');
