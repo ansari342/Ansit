@@ -74,8 +74,11 @@ export const SurahPickerModal: React.FC<SurahPickerModalProps> = ({
         <FlatList
           data={filteredSurahs}
           keyExtractor={item => item.number.toString()}
-          initialNumToRender={15}
-          maxToRenderPerBatch={20}
+          initialNumToRender={18}
+          maxToRenderPerBatch={25}
+          windowSize={8}
+          removeClippedSubviews={true}
+          getItemLayout={(_, index) => ({ length: 66, offset: 66 * index, index })}
           keyboardShouldPersistTaps="handled"
           renderItem={({ item }) => {
             const isSelected = item.number === selectedSurah.number;

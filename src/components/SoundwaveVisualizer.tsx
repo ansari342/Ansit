@@ -8,14 +8,14 @@ interface SoundwaveVisualizerProps {
   maxHeight?: number;
 }
 
-export const SoundwaveVisualizer: React.FC<SoundwaveVisualizerProps> = ({
+export const SoundwaveVisualizer: React.FC<SoundwaveVisualizerProps> = React.memo(({
   isPlaying,
   color = '#9bbfff',
   barCount = 5,
   maxHeight = 20,
 }) => {
   const animValues = useRef(
-    Array.from({ length: barCount }, () => new Animated.Value(4))
+    Array.from({ length: barCount }, () => new Animated.Value(0.2))
   ).current;
 
   useEffect(() => {
@@ -23,21 +23,21 @@ export const SoundwaveVisualizer: React.FC<SoundwaveVisualizerProps> = ({
 
     if (isPlaying) {
       animValues.forEach((val, index) => {
-        const minH = 4;
-        const maxH = maxHeight * (0.5 + 0.5 * Math.sin((index + 1) * 1.3));
+        const minScale = 0.2;
+        const maxScale = 0.45 + 0.55 * Math.sin((index + 1) * 1.3);
         const duration = 380 + index * 80;
 
         const anim = Animated.loop(
           Animated.sequence([
             Animated.timing(val, {
-              toValue: maxH,
+              toValue: maxScale,
               duration,
-              useNativeDriver: false,
+              useNativeDriver: true,
             }),
             Animated.timing(val, {
-              toValue: minH,
+              toValue: minScale,
               duration: duration * 0.9,
-              useNativeDriver: false,
+              useNativeDriver: true,
             }),
           ])
         );
@@ -47,9 +47,9 @@ export const SoundwaveVisualizer: React.FC<SoundwaveVisualizerProps> = ({
     } else {
       animValues.forEach(val => {
         Animated.timing(val, {
-          toValue: 4,
+          toValue: 0.2,
           duration: 250,
-          useNativeDriver: false,
+          useNativeDriver: true,
         }).start();
       });
     }
@@ -68,14 +68,15 @@ export const SoundwaveVisualizer: React.FC<SoundwaveVisualizerProps> = ({
             styles.bar,
             {
               backgroundColor: color,
-              height: val,
+              height: maxHeight,
+              transform: [{ scaleY: val }],
             },
           ]}
         />
       ))}
     </View>
   );
-};
+});
 
 const styles = StyleSheet.create({
   container: {

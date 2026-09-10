@@ -7,8 +7,10 @@ let nextSound: Audio.Sound | null = null;
 let nextVerseKey: string | null = null;
 let isAudioInitialized = false;
 let activePlaybackId = 0;
+let currentSoundVerseKey: string | null = null;
 
-export async function initAudioMode(): Promise<void> {
+export async function initAudioMode(force: boolean = false): Promise<void> {
+  if (isAudioInitialized && !force) return;
   try {
     await Audio.setAudioModeAsync({
       allowsRecordingIOS: false,
@@ -90,13 +92,6 @@ export async function loadAndPlayAyah(
 
   const key = makeVerseKey(reciter, surahNumber, ayahNumber);
 
-  // Stop & unload previous sound asynchronously without blocking
-  const oldSound = currentSound;
-  currentSound = null;
-  if (oldSound) {
-    oldSound.stopAsync().then(() => oldSound.unloadAsync()).catch(() => {});
-  }
-
   const createStatusHandler = () => (status: AVPlaybackStatus) => {
     // Ignore updates if this playback request was superseded
     if (currentRequestId !== activePlaybackId) return;
@@ -125,7 +120,32 @@ export async function loadAndPlayAyah(
     }
   };
 
-  // 1. Check if we already preloaded this in nextSound!
+  // 1. If already loaded with this exact key (continuous surah), reuse sound directly!
+  if (currentSound && currentSoundVerseKey === key) {
+    try {
+      const status = await currentSound.getStatusAsync();
+      if (status.isLoaded) {
+        currentSound.setOnPlaybackStatusUpdate(createStatusHandler());
+        if (status.rate !== playbackSpeed) {
+          await currentSound.setRateAsync(playbackSpeed, true);
+        }
+        if (!status.isPlaying) {
+          await currentSound.playAsync();
+        }
+        return currentSound;
+      }
+    } catch (e) {}
+  }
+
+  // Stop & unload previous sound asynchronously without blocking
+  const oldSound = currentSound;
+  currentSound = null;
+  currentSoundVerseKey = null;
+  if (oldSound) {
+    oldSound.stopAsync().then(() => oldSound.unloadAsync()).catch(() => {});
+  }
+
+  // 2. Check if we already preloaded this in nextSound!
   if (nextSound && nextVerseKey === key) {
     const sound = nextSound;
     nextSound = null;
@@ -136,6 +156,7 @@ export async function loadAndPlayAyah(
       await sound.playAsync();
       if (currentRequestId === activePlaybackId) {
         currentSound = sound;
+        currentSoundVerseKey = key;
         return sound;
       } else {
         sound.stopAsync().then(() => sound.unloadAsync()).catch(() => {});
@@ -146,7 +167,7 @@ export async function loadAndPlayAyah(
     }
   }
 
-  // 2. Otherwise load from cache or remote stream
+  // 3. Otherwise load from cache or remote stream
   try {
     const uri = await getOrDownloadVerseAudio(reciter, surahNumber, ayahNumber);
     if (currentRequestId !== activePlaybackId) return null;
@@ -159,6 +180,7 @@ export async function loadAndPlayAyah(
 
     if (currentRequestId === activePlaybackId) {
       currentSound = sound;
+      currentSoundVerseKey = key;
       return sound;
     } else {
       sound.stopAsync().then(() => sound.unloadAsync()).catch(() => {});
@@ -222,6 +244,7 @@ export async function stopAndUnloadAudio(): Promise<void> {
       await currentSound.unloadAsync();
     } catch (e) {}
     currentSound = null;
+    currentSoundVerseKey = null;
   }
   if (nextSound) {
     try {

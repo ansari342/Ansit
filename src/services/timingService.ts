@@ -93,8 +93,11 @@ export async function fetchSurahVerseTimings(
   // 4. Fetch live verse timestamps from Quran.com API
   if (actualReciter.quranComId) {
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
       const apiUrl = `https://api.quran.com/api/v4/chapter_recitations/${actualReciter.quranComId}/${surahNumber}?segments=true`;
-      const res = await fetch(apiUrl);
+      const res = await fetch(apiUrl, { signal: controller.signal });
+      clearTimeout(timeoutId);
       if (res.ok) {
         const data = await res.json();
         const timestamps = data.audio_file?.timestamps || [];

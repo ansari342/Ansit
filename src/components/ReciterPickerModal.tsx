@@ -75,6 +75,11 @@ export const ReciterPickerModal: React.FC<ReciterPickerModalProps> = ({
           keyExtractor={item => item.id}
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={{ paddingBottom: 30 }}
+          removeClippedSubviews={true}
+          initialNumToRender={12}
+          maxToRenderPerBatch={20}
+          windowSize={8}
+          getItemLayout={(_, index) => ({ length: 72, offset: 72 * index, index })}
           renderItem={({ item }) => {
             const isSelected = item.id === selectedReciter.id;
             return (

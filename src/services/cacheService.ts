@@ -74,16 +74,24 @@ export async function prefetchVerseRange(
 ): Promise<void> {
   await ensureDirectoryExists();
   if (reciter.isSurahBased) {
-    getOrDownloadVerseAudio(reciter, surah, 1).catch(err => {
-      console.warn('Background pre-fetch warning:', err);
-    });
+    getOrDownloadVerseAudio(reciter, surah, 1).catch(() => {});
     return;
   }
-  const promises: Promise<string>[] = [];
-  for (let ayah = fromVerse; ayah <= toVerse; ayah++) {
-    promises.push(getOrDownloadVerseAudio(reciter, surah, ayah));
-  }
-  Promise.all(promises).catch(err => {
-    console.warn('Background pre-fetch warning:', err);
-  });
+
+  // Pre-cache the first 8 upcoming verses in small concurrency batches of 2
+  // to avoid network socket exhaustion while ensuring instant playback.
+  const maxToCache = Math.min(toVerse, fromVerse + 7);
+  (async () => {
+    for (let ayah = fromVerse; ayah <= maxToCache; ayah += 2) {
+      const batch = [getOrDownloadVerseAudio(reciter, surah, ayah)];
+      if (ayah + 1 <= maxToCache) {
+        batch.push(getOrDownloadVerseAudio(reciter, surah, ayah + 1));
+      }
+      try {
+        await Promise.all(batch);
+      } catch (e) {
+        break;
+      }
+    }
+  })().catch(() => {});
 }

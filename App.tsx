@@ -10,7 +10,7 @@ import { LoopSettingsModal } from './src/components/LoopSettingsModal';
 import { Surah, Reciter, LoopSettings } from './src/types';
 import { SURAHS } from './src/data/surahs';
 import { RECITERS } from './src/data/reciters';
-import { stopAndUnloadAudio, initAudioMode } from './src/services/audioService';
+import { stopAndUnloadAudio, initAudioMode, setAudioRate } from './src/services/audioService';
 import { SoundwaveVisualizer } from './src/components/SoundwaveVisualizer';
 import { BouncyTouchable } from './src/components/BouncyTouchable';
 import { LandingScreen } from './src/components/LandingScreen';
@@ -277,7 +277,10 @@ export default function App() {
       <LoopSettingsModal
         visible={settingsModalVisible}
         settings={loopSettings}
-        onUpdateSettings={setLoopSettings}
+        onUpdateSettings={newSettings => {
+          setLoopSettings(newSettings);
+          setAudioRate(newSettings.playbackSpeed);
+        }}
         onClose={handleCloseSettings}
       />
 

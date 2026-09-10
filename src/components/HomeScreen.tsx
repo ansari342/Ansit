@@ -209,6 +209,30 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
     onSelectionChange?.(surah, targetFrom, targetTo, selectedReciter);
   };
 
+  const persistTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const debouncePersistSession = useCallback(
+    (surah: Surah, from: number, to: number, reciter: Reciter) => {
+      if (persistTimeoutRef.current) {
+        clearTimeout(persistTimeoutRef.current);
+      }
+      persistTimeoutRef.current = setTimeout(() => {
+        setSurahRanges(prev => {
+          const updated = {
+            ...prev,
+            [surah.number]: { from, to },
+          };
+          saveSurahRanges(updated);
+          return updated;
+        });
+        lastActiveSessionKey.current = `${surah.number}_${from}_${to}_${reciter.id}`;
+        saveLastSession(surah.number, from, to, reciter.id);
+        onSelectionChange?.(surah, from, to, reciter);
+      }, 250);
+    },
+    [onSelectionChange]
+  );
+
   const handleFromWheelChange = useCallback(
     (newFrom: number) => {
       setFromVerse(newFrom);
@@ -216,20 +240,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
       if (newFrom > toVerse) {
         setToVerse(newFrom);
       }
-      setSurahRanges(prev => {
-        const updated = {
-          ...prev,
-          [selectedSurah.number]: { from: newFrom, to: targetTo },
-        };
-        saveSurahRanges(updated);
-        return updated;
-      });
-
-      lastActiveSessionKey.current = `${selectedSurah.number}_${newFrom}_${targetTo}_${selectedReciter.id}`;
-      saveLastSession(selectedSurah.number, newFrom, targetTo, selectedReciter.id);
-      onSelectionChange?.(selectedSurah, newFrom, targetTo, selectedReciter);
+      debouncePersistSession(selectedSurah, newFrom, targetTo, selectedReciter);
     },
-    [toVerse, selectedSurah, selectedReciter, onSelectionChange]
+    [toVerse, selectedSurah, selectedReciter, debouncePersistSession]
   );
 
   const handleToWheelChange = useCallback(
@@ -239,21 +252,13 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
       if (newTo < fromVerse) {
         setFromVerse(newTo);
       }
-      setSurahRanges(prev => {
-        const updated = {
-          ...prev,
-          [selectedSurah.number]: { from: targetFrom, to: newTo },
-        };
-        saveSurahRanges(updated);
-        return updated;
-      });
-
-      lastActiveSessionKey.current = `${selectedSurah.number}_${targetFrom}_${newTo}_${selectedReciter.id}`;
-      saveLastSession(selectedSurah.number, targetFrom, newTo, selectedReciter.id);
-      onSelectionChange?.(selectedSurah, targetFrom, newTo, selectedReciter);
+      debouncePersistSession(selectedSurah, targetFrom, newTo, selectedReciter);
     },
-    [fromVerse, selectedSurah, selectedReciter, onSelectionChange]
+    [fromVerse, selectedSurah, selectedReciter, debouncePersistSession]
   );
+
+  const handleWheelScrollStart = useCallback(() => setIsParentScrollEnabled(false), []);
+  const handleWheelScrollEnd = useCallback(() => setIsParentScrollEnabled(true), []);
 
   const handleSelectReciter = (reciter: Reciter) => {
     setSelectedReciter(reciter);
@@ -268,6 +273,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
     to: number,
     reciter: Reciter
   ) => {
+    if (persistTimeoutRef.current) {
+      clearTimeout(persistTimeoutRef.current);
+    }
     try {
       await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     } catch (e) {}
@@ -511,8 +519,8 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
               max={selectedSurah.numberOfAyahs}
               value={fromVerse}
               onChange={handleFromWheelChange}
-              onScrollStart={() => setIsParentScrollEnabled(false)}
-              onScrollEnd={() => setIsParentScrollEnabled(true)}
+              onScrollStart={handleWheelScrollStart}
+              onScrollEnd={handleWheelScrollEnd}
             />
 
             <View style={styles.wheelArrowDivider}>
@@ -525,8 +533,8 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
               max={selectedSurah.numberOfAyahs}
               value={toVerse}
               onChange={handleToWheelChange}
-              onScrollStart={() => setIsParentScrollEnabled(false)}
-              onScrollEnd={() => setIsParentScrollEnabled(true)}
+              onScrollStart={handleWheelScrollStart}
+              onScrollEnd={handleWheelScrollEnd}
             />
           </View>
         </View>

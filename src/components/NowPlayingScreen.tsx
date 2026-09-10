@@ -68,6 +68,94 @@ const toArabicIndic = (num: number): string => {
     .join('');
 };
 
+interface QuranCardViewProps {
+  currentVerse?: Verse;
+  currentVerseNum: number;
+  showBismillahHeader: boolean;
+  cardOpacity: Animated.Value;
+  cardScale: Animated.Value;
+  cardSlideX: Animated.Value;
+  auraGlow: Animated.Value;
+}
+
+const QuranCardView = React.memo<QuranCardViewProps>(({
+  currentVerse,
+  currentVerseNum,
+  showBismillahHeader,
+  cardOpacity,
+  cardScale,
+  cardSlideX,
+  auraGlow,
+}) => {
+  const cardScrollRef = useRef<ScrollView>(null);
+
+  useEffect(() => {
+    cardScrollRef.current?.scrollTo({ y: 0, animated: false });
+  }, [currentVerseNum]);
+
+  return (
+    <View style={styles.cardWrapper}>
+      {/* Meditative Ambient Radial Aura */}
+      <Animated.View
+        style={[
+          styles.ambientAura,
+          {
+            opacity: auraGlow,
+          },
+        ]}
+      />
+
+      <Animated.View
+        style={[
+          styles.quranCard,
+          {
+            opacity: cardOpacity,
+            transform: [{ scale: cardScale }, { translateX: cardSlideX }],
+          },
+        ]}
+      >
+        <ScrollView
+          ref={cardScrollRef}
+          contentContainerStyle={styles.cardScrollContent}
+          showsVerticalScrollIndicator={false}
+        >
+          {/* Gilded Bismillah Banner */}
+          {showBismillahHeader && (
+            <View style={styles.bismillahBox}>
+              <Text style={styles.bismillahText}>
+                بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ
+              </Text>
+              <View style={styles.bismillahUnderline} />
+            </View>
+          )}
+
+          {/* Accurate Arabic Text with End-of-Ayah Ornament */}
+          <Text style={styles.arabicText}>
+            {currentVerse?.arabicText ? (
+              <>
+                {currentVerse.arabicText}
+                <Text style={styles.ayahEndSymbol}>
+                  {' '}
+                  ﴿{toArabicIndic(currentVerseNum)}﴾
+                </Text>
+              </>
+            ) : (
+              'Loading verse...'
+            )}
+          </Text>
+
+          <View style={styles.cardDivider} />
+
+          {/* English Translation */}
+          <Text style={styles.translationText}>
+            "{currentVerse?.englishText || 'Loading translation...'}"
+          </Text>
+        </ScrollView>
+      </Animated.View>
+    </View>
+  );
+});
+
 export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
   surah,
   fromVerse,
@@ -780,64 +868,15 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       </View>
 
       {/* 3. MIDDLE SECTION: QURAN CARD WITH AMBIENT GLOW & SPRING ANIMATION */}
-      <View style={styles.cardWrapper}>
-        {/* Meditative Ambient Radial Aura */}
-        <Animated.View
-          style={[
-            styles.ambientAura,
-            {
-              opacity: auraGlow,
-            },
-          ]}
-        />
-
-        <Animated.View
-          style={[
-            styles.quranCard,
-            {
-              opacity: cardOpacity,
-              transform: [{ scale: cardScale }, { translateX: cardSlideX }],
-            },
-          ]}
-        >
-          <ScrollView
-            contentContainerStyle={styles.cardScrollContent}
-            showsVerticalScrollIndicator={false}
-          >
-            {/* Gilded Bismillah Banner */}
-            {showBismillahHeader && (
-              <View style={styles.bismillahBox}>
-                <Text style={styles.bismillahText}>
-                  بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ
-                </Text>
-                <View style={styles.bismillahUnderline} />
-              </View>
-            )}
-
-            {/* Accurate Arabic Text with End-of-Ayah Ornament */}
-            <Text style={styles.arabicText}>
-              {currentVerse?.arabicText ? (
-                <>
-                  {currentVerse.arabicText}
-                  <Text style={styles.ayahEndSymbol}>
-                    {' '}
-                    ﴿{toArabicIndic(currentVerseNum)}﴾
-                  </Text>
-                </>
-              ) : (
-                'Loading verse...'
-              )}
-            </Text>
-
-            <View style={styles.cardDivider} />
-
-            {/* English Translation */}
-            <Text style={styles.translationText}>
-              "{currentVerse?.englishText || 'Loading translation...'}"
-            </Text>
-          </ScrollView>
-        </Animated.View>
-      </View>
+      <QuranCardView
+        currentVerse={currentVerse}
+        currentVerseNum={currentVerseNum}
+        showBismillahHeader={showBismillahHeader}
+        cardOpacity={cardOpacity}
+        cardScale={cardScale}
+        cardSlideX={cardSlideX}
+        auraGlow={auraGlow}
+      />
 
       {/* 4. PERMANENTLY STATIC BOTTOM SECTION WITH SCRUBBER & CONTROLS */}
       <View style={styles.bottomSection}>

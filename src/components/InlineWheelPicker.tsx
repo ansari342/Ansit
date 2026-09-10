@@ -1,4 +1,4 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
@@ -24,7 +24,7 @@ interface InlineWheelPickerProps {
 
 const ITEM_HEIGHT = 46;
 
-export const InlineWheelPicker: React.FC<InlineWheelPickerProps> = ({
+export const InlineWheelPicker: React.FC<InlineWheelPickerProps> = React.memo(({
   label,
   min,
   max,
@@ -43,7 +43,10 @@ export const InlineWheelPicker: React.FC<InlineWheelPickerProps> = ({
   valueRef.current = value;
 
   const safeMax = Math.max(min, max);
-  const items = Array.from({ length: safeMax - min + 1 }, (_, i) => min + i);
+  const items = useMemo(
+    () => Array.from({ length: safeMax - min + 1 }, (_, i) => min + i),
+    [safeMax, min]
+  );
   const initialOffsetY = Math.max(0, (value - min) * itemHeight);
 
   // Sync scroll position when value changes externally (e.g. preset clicked or clamped)
@@ -58,17 +61,17 @@ export const InlineWheelPicker: React.FC<InlineWheelPickerProps> = ({
     }
   }, [value, min, itemHeight]);
 
-  const triggerHaptic = () => {
+  const triggerHaptic = useCallback(() => {
     const now = Date.now();
-    if (now - lastHapticTimeRef.current > 35) {
+    if (now - lastHapticTimeRef.current > 40) {
       lastHapticTimeRef.current = now;
       try {
         Haptics.selectionAsync();
       } catch (err) {}
     }
-  };
+  }, []);
 
-  const handleScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+  const handleScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const y = e.nativeEvent.contentOffset.y;
     const index = Math.round(y / itemHeight);
     const clampedIndex = Math.max(0, Math.min(items.length - 1, index));
@@ -78,9 +81,9 @@ export const InlineWheelPicker: React.FC<InlineWheelPickerProps> = ({
       triggerHaptic();
       onChange(items[clampedIndex]);
     }
-  };
+  }, [itemHeight, items, onChange, triggerHaptic]);
 
-  const handleItemPress = (itemVal: number) => {
+  const handleItemPress = useCallback((itemVal: number) => {
     const targetIndex = itemVal - min;
     lastIndexRef.current = targetIndex;
     try {
@@ -91,30 +94,30 @@ export const InlineWheelPicker: React.FC<InlineWheelPickerProps> = ({
       animated: true,
     });
     onChange(itemVal);
-  };
+  }, [min, itemHeight, onChange]);
 
-  const handleStep = (delta: number) => {
+  const handleStep = useCallback((delta: number) => {
     const currentVal = valueRef.current;
     const nextVal = Math.max(min, Math.min(safeMax, currentVal + delta));
     if (nextVal !== currentVal) {
       handleItemPress(nextVal);
     }
-  };
+  }, [min, safeMax, handleItemPress]);
 
   // Continuous stepping when pressing and holding the stepper arrow
-  const startStepping = (delta: number) => {
+  const startStepping = useCallback((delta: number) => {
     handleStep(delta);
     stepIntervalRef.current = setInterval(() => {
       handleStep(delta);
     }, 85);
-  };
+  }, [handleStep]);
 
-  const stopStepping = () => {
+  const stopStepping = useCallback(() => {
     if (stepIntervalRef.current) {
       clearInterval(stepIntervalRef.current);
       stepIntervalRef.current = null;
     }
-  };
+  }, []);
 
   return (
     <View style={styles.container}>
@@ -158,6 +161,7 @@ export const InlineWheelPicker: React.FC<InlineWheelPickerProps> = ({
           decelerationRate="normal"
           disableIntervalMomentum={false}
           nestedScrollEnabled={true}
+          removeClippedSubviews={true}
           onTouchStart={() => {
             isScrollingRef.current = true;
             onScrollStart?.();
@@ -222,7 +226,7 @@ export const InlineWheelPicker: React.FC<InlineWheelPickerProps> = ({
       </TouchableOpacity>
     </View>
   );
-};
+});
 
 const styles = StyleSheet.create({
   container: {

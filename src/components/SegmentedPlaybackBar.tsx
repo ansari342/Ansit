@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useRef, useState, useMemo } from 'react';
 import {
   View,
   Text,
@@ -18,7 +18,7 @@ interface SegmentedPlaybackBarProps {
   onSeekingChange?: (isSeeking: boolean) => void;
 }
 
-export const SegmentedPlaybackBar: React.FC<SegmentedPlaybackBarProps> = ({
+export const SegmentedPlaybackBar: React.FC<SegmentedPlaybackBarProps> = React.memo(({
   fromVerse,
   toVerse,
   currentVerseNum,
@@ -134,7 +134,10 @@ export const SegmentedPlaybackBar: React.FC<SegmentedPlaybackBarProps> = ({
   );
 
   const displayAyah = isScrubbing ? scrubTargetAyah : currentVerseNum;
-  const segments = Array.from({ length: totalVerses }, (_, idx) => fromVerse + idx);
+  const segments = useMemo(
+    () => Array.from({ length: totalVerses }, (_, idx) => fromVerse + idx),
+    [totalVerses, fromVerse]
+  );
 
   // Compute handle position on the bar
   const activeSegmentIdx = Math.max(0, Math.min(totalVerses - 1, currentVerseNum - fromVerse));
@@ -232,7 +235,7 @@ export const SegmentedPlaybackBar: React.FC<SegmentedPlaybackBarProps> = ({
       </View>
     </View>
   );
-};
+});
 
 const styles = StyleSheet.create({
   container: {
