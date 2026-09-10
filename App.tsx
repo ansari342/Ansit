@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { View, StyleSheet, TouchableOpacity, Text } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
@@ -37,6 +37,7 @@ export default function App() {
     fromVerse: number;
     toVerse: number;
     reciter: Reciter;
+    sessionId?: number;
   }>({
     surah: initialSurah,
     fromVerse: 1,
@@ -110,7 +111,7 @@ export default function App() {
 
   const [settingsModalVisible, setSettingsModalVisible] = useState<boolean>(false);
 
-  const handleStartPlayback = (
+  const handleStartPlayback = useCallback((
     surah: Surah,
     fromVerse: number,
     toVerse: number,
@@ -121,12 +122,49 @@ export default function App() {
       fromVerse,
       toVerse,
       reciter,
+      sessionId: Date.now(),
     };
     setSession(newSession);
     saveLastSession(surah.number, fromVerse, toVerse, reciter.id);
     setHasStartedPlaying(true);
     setCurrentScreen('nowPlaying');
-  };
+  }, []);
+
+  const handleOpenSettings = useCallback(() => {
+    setSettingsModalVisible(true);
+  }, []);
+
+  const handleCloseSettings = useCallback(() => {
+    setSettingsModalVisible(false);
+  }, []);
+
+  const handleSelectionChange = useCallback((
+    surah: Surah,
+    fromVerse: number,
+    toVerse: number,
+    reciter: Reciter
+  ) => {
+    setSession({ surah, fromVerse, toVerse, reciter });
+  }, []);
+
+  const handlePlaybackStateChange = useCallback((newState: {
+    isPlaying: boolean;
+    currentVerseNum: number;
+    togglePlayPause: () => void;
+    currentReciterName?: string;
+  }) => {
+    setPlaybackState(prev => {
+      if (
+        prev.isPlaying === newState.isPlaying &&
+        prev.currentVerseNum === newState.currentVerseNum &&
+        prev.currentReciterName === newState.currentReciterName &&
+        prev.togglePlayPause === newState.togglePlayPause
+      ) {
+        return prev;
+      }
+      return newState;
+    });
+  }, []);
 
   const handleToggleMiniPlayPause = () => {
     try {
@@ -156,11 +194,9 @@ export default function App() {
       >
         <HomeScreen
           onStartPlayback={handleStartPlayback}
-          onOpenSettings={() => setSettingsModalVisible(true)}
+          onOpenSettings={handleOpenSettings}
           activeSession={sessionLoaded ? session : undefined}
-          onSelectionChange={(surah, fromVerse, toVerse, reciter) => {
-            setSession({ surah, fromVerse, toVerse, reciter });
-          }}
+          onSelectionChange={handleSelectionChange}
         />
 
         {/* MINIMIZED PLAYER BAR ON HOME SCREEN */}
@@ -229,9 +265,10 @@ export default function App() {
             fromVerse={session.fromVerse}
             toVerse={session.toVerse}
             reciter={session.reciter}
+            sessionId={session.sessionId}
             initialLoopSettings={loopSettings}
             onMinimize={() => setCurrentScreen('home')}
-            onPlaybackStateChange={setPlaybackState}
+            onPlaybackStateChange={handlePlaybackStateChange}
           />
         </View>
       )}
@@ -241,7 +278,7 @@ export default function App() {
         visible={settingsModalVisible}
         settings={loopSettings}
         onUpdateSettings={setLoopSettings}
-        onClose={() => setSettingsModalVisible(false)}
+        onClose={handleCloseSettings}
       />
 
       {/* DELIGHTFUL LANDING SCREEN (Swipe up to enter) */}

@@ -1,8 +1,10 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Surah, Verse } from '../types';
 import { SURAHS } from '../data/surahs';
 import { PRESET_VERSES } from '../data/presetVerses';
 
 const BISMILLAH = 'بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ';
+const STORAGE_PREFIX = '@quran_verses_v2_';
 
 function cleanVerseText(surahNumber: number, ayahNumber: number, text: string): string {
   if (surahNumber !== 1 && ayahNumber === 1) {
@@ -19,6 +21,7 @@ function cleanVerseText(surahNumber: number, ayahNumber: number, text: string): 
 const cache: Record<number, Verse[]> = { ...PRESET_VERSES };
 
 export async function getVersesForSurah(surahNumber: number): Promise<Verse[]> {
+  // 1. In-memory cache
   if (cache[surahNumber] && cache[surahNumber].length > 0) {
     return cache[surahNumber].map(v => ({
       ...v,
@@ -26,10 +29,32 @@ export async function getVersesForSurah(surahNumber: number): Promise<Verse[]> {
     }));
   }
 
+  // 2. Persistent disk cache (instant offline loading)
   try {
+    const diskData = await AsyncStorage.getItem(`${STORAGE_PREFIX}${surahNumber}`);
+    if (diskData) {
+      const parsed: Verse[] = JSON.parse(diskData);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        cache[surahNumber] = parsed;
+        return parsed.map(v => ({
+          ...v,
+          arabicText: cleanVerseText(surahNumber, v.numberInSurah, v.arabicText),
+        }));
+      }
+    }
+  } catch (e) {}
+
+  // 3. Network fetch with 8s abort timeout
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+
     const res = await fetch(
-      `https://api.alquran.cloud/v1/surah/${surahNumber}/editions/quran-uthmani,en.sahih`
+      `https://api.alquran.cloud/v1/surah/${surahNumber}/editions/quran-uthmani,en.sahih`,
+      { signal: controller.signal }
     );
+    clearTimeout(timeoutId);
+
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
 
@@ -44,6 +69,7 @@ export async function getVersesForSurah(surahNumber: number): Promise<Verse[]> {
     }));
 
     cache[surahNumber] = verses;
+    AsyncStorage.setItem(`${STORAGE_PREFIX}${surahNumber}`, JSON.stringify(verses)).catch(() => {});
     return verses;
   } catch (error) {
     console.warn(`Failed to fetch verses for surah ${surahNumber}:`, error);

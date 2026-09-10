@@ -55,7 +55,7 @@ interface HomeScreenProps {
   ) => void;
 }
 
-export const HomeScreen: React.FC<HomeScreenProps> = ({
+export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
   onStartPlayback,
   onOpenSettings,
   activeSession,
@@ -580,7 +580,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       />
     </SafeAreaView>
   );
-};
+});
 
 const styles = StyleSheet.create({
   container: {

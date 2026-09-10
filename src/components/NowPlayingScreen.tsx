@@ -21,6 +21,7 @@ import {
   seekAudio,
   stopAndUnloadAudio,
   setAudioRate,
+  isAudioLoaded,
 } from '../services/audioService';
 import { prefetchVerseRange } from '../services/cacheService';
 import { LoopSettingsModal } from './LoopSettingsModal';
@@ -38,6 +39,7 @@ import { SoundwaveVisualizer } from './SoundwaveVisualizer';
 import { BouncyTouchable } from './BouncyTouchable';
 import { SegmentedPlaybackBar } from './SegmentedPlaybackBar';
 import { updateCarPlayState } from '../services/carPlayService';
+import { recordListenSession } from '../services/analyticsService';
 
 interface PlaybackStateReport {
   isPlaying: boolean;
@@ -51,6 +53,7 @@ interface NowPlayingScreenProps {
   fromVerse: number;
   toVerse: number;
   reciter: Reciter;
+  sessionId?: number;
   initialLoopSettings?: LoopSettings;
   onMinimize: () => void;
   onPlaybackStateChange?: (state: PlaybackStateReport) => void;
@@ -70,6 +73,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
   fromVerse,
   toVerse,
   reciter,
+  sessionId,
   initialLoopSettings,
   onMinimize,
   onPlaybackStateChange,
@@ -440,6 +444,17 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     ]
   );
 
+  // Auto-play when verses and timings are loaded for this session
+  const lastSessionKeyRef = useRef<string>('');
+  useEffect(() => {
+    const sessionKey = `${surah.number}_${fromVerse}_${toVerse}_${reciter.id}_${sessionId || 0}`;
+    if (verses.length > 0 && lastSessionKeyRef.current !== sessionKey) {
+      lastSessionKeyRef.current = sessionKey;
+      playVerse(fromVerse, 1);
+      recordListenSession(surah, fromVerse, toVerse, currentEffectiveReciter).catch(() => {});
+    }
+  }, [verses, fromVerse, toVerse, surah.number, reciter.id, sessionId, playVerse, currentEffectiveReciter]);
+
   // Advance to next reciter when a loop cycle completes in Multiple Reciters mode
   const advanceToNextReciterAndLoop = async (targetAyah: number) => {
     stateRef.current.isLoopingTransition = true;
@@ -571,40 +586,51 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       return;
     }
 
+    // Individual repeat satisfied
+    setVersePlayCount(1);
+
     if (settings.mode === 'single') {
       if (isMultipleMode) {
         await advanceToNextReciterAndLoop(curr);
       } else {
         playVerse(curr, 1);
       }
-      return;
-    }
-
-    if (curr < to) {
-      playVerse(curr + 1, 1);
-    } else {
-      if (settings.mode === 'range') {
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    } else if (settings.mode === 'range') {
+      if (curr < to) {
+        playVerse(curr + 1, 1);
+      } else {
         if (isMultipleMode) {
           await advanceToNextReciterAndLoop(from);
         } else {
           playVerse(from, 1);
         }
+      }
+    } else {
+      if (curr < to) {
+        playVerse(curr + 1, 1);
       } else {
-        setIsPlaying(false);
+        if (isMultipleMode) {
+          await advanceToNextReciterAndLoop(from);
+        } else {
+          playVerse(from, 1);
+        }
       }
     }
   };
 
-  const handleTogglePlayPause = async () => {
+  const handleTogglePlayPause = useCallback(async () => {
     if (isPlaying) {
       await pauseAudio();
       setIsPlaying(false);
     } else {
-      await resumeAudio();
-      setIsPlaying(true);
+      const resumed = await resumeAudio();
+      if (!resumed) {
+        await playVerse(currentVerseNum, 1);
+      } else {
+        setIsPlaying(true);
+      }
     }
-  };
+  }, [isPlaying, currentVerseNum, playVerse]);
 
   // Sync state to parent mini-player and CarPlay
   useEffect(() => {
@@ -632,7 +658,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
   const handleSeekAyah = useCallback(
     async (targetAyah: number, seekFraction: number = 0) => {
       isUserScrubbingRef.current = false;
-      if (isTimedReciter) {
+      if (isTimedReciter && isAudioLoaded()) {
         const timing = stateRef.current.verseTimings[targetAyah];
         if (timing) {
           const ayahDuration = Math.max(1, timing.endMs - timing.startMs);
@@ -649,7 +675,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
           await seekAudio(targetPosMs);
         }
       } else {
-        if (targetAyah !== stateRef.current.currentVerseNum) {
+        if (targetAyah !== stateRef.current.currentVerseNum || !isAudioLoaded()) {
           await playVerse(targetAyah, 1, currentEffectiveReciter);
           if (seekFraction > 0) {
             const dur = currentVerseDurationMillis > 1 ? currentVerseDurationMillis : 10000;
@@ -674,7 +700,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     } catch (e) {}
 
     const prevAyah = Math.max(fromVerse, currentVerseNum - 1);
-    if (isTimedReciter) {
+    if (isTimedReciter && isAudioLoaded()) {
       setCurrentVerseNum(prevAyah);
       animateVerseChange();
       const timing = stateRef.current.verseTimings[prevAyah];
@@ -690,7 +716,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     } catch (e) {}
 
     const nextAyah = Math.min(toVerse, currentVerseNum + 1);
-    if (isTimedReciter) {
+    if (isTimedReciter && isAudioLoaded()) {
       setCurrentVerseNum(nextAyah);
       animateVerseChange();
       const timing = stateRef.current.verseTimings[nextAyah];

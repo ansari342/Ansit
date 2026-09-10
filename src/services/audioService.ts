@@ -6,6 +6,7 @@ let currentSound: Audio.Sound | null = null;
 let nextSound: Audio.Sound | null = null;
 let nextVerseKey: string | null = null;
 let isAudioInitialized = false;
+let activePlaybackId = 0;
 
 export async function initAudioMode(): Promise<void> {
   try {
@@ -74,7 +75,8 @@ export async function preloadUpcomingVerse(
 }
 
 /**
- * Load and play an ayah. If it was preloaded in nextSound, plays instantly (<10ms)!
+ * Load and play an ayah. Uses activePlaybackId token to eliminate race conditions
+ * during rapid seeking, skipping, or reciter switching.
  */
 export async function loadAndPlayAyah(
   surahNumber: number,
@@ -83,6 +85,7 @@ export async function loadAndPlayAyah(
   playbackSpeed: number = 1.0,
   onStatusUpdate?: PlaybackStatusCallback
 ): Promise<Audio.Sound | null> {
+  const currentRequestId = ++activePlaybackId;
   await initAudioMode();
 
   const key = makeVerseKey(reciter, surahNumber, ayahNumber);
@@ -95,6 +98,9 @@ export async function loadAndPlayAyah(
   }
 
   const createStatusHandler = () => (status: AVPlaybackStatus) => {
+    // Ignore updates if this playback request was superseded
+    if (currentRequestId !== activePlaybackId) return;
+
     if (!status.isLoaded) {
       if (onStatusUpdate) {
         onStatusUpdate({
@@ -119,7 +125,7 @@ export async function loadAndPlayAyah(
     }
   };
 
-  // CHECK IF WE ALREADY PRELOADED THIS IN NEXT SOUND!
+  // 1. Check if we already preloaded this in nextSound!
   if (nextSound && nextVerseKey === key) {
     const sound = nextSound;
     nextSound = null;
@@ -128,28 +134,44 @@ export async function loadAndPlayAyah(
     sound.setOnPlaybackStatusUpdate(createStatusHandler());
     try {
       await sound.playAsync();
-      currentSound = sound;
-      return sound;
+      if (currentRequestId === activePlaybackId) {
+        currentSound = sound;
+        return sound;
+      } else {
+        sound.stopAsync().then(() => sound.unloadAsync()).catch(() => {});
+        return null;
+      }
     } catch (e) {
       console.warn('Preloaded sound play failed, fallback to fresh load', e);
     }
   }
 
-  // Otherwise load from local cache or remote
+  // 2. Otherwise load from cache or remote stream
   try {
     const uri = await getOrDownloadVerseAudio(reciter, surahNumber, ayahNumber);
+    if (currentRequestId !== activePlaybackId) return null;
+
     const { sound } = await Audio.Sound.createAsync(
       { uri },
       { shouldPlay: true, rate: playbackSpeed, shouldCorrectPitch: true },
       createStatusHandler()
     );
 
-    currentSound = sound;
-    return sound;
+    if (currentRequestId === activePlaybackId) {
+      currentSound = sound;
+      return sound;
+    } else {
+      sound.stopAsync().then(() => sound.unloadAsync()).catch(() => {});
+      return null;
+    }
   } catch (error) {
     console.warn(`Error playing audio for ${key}:`, error);
     return null;
   }
+}
+
+export function isAudioLoaded(): boolean {
+  return currentSound !== null;
 }
 
 export async function pauseAudio(): Promise<void> {
@@ -160,13 +182,20 @@ export async function pauseAudio(): Promise<void> {
   }
 }
 
-export async function resumeAudio(): Promise<void> {
+export async function resumeAudio(): Promise<boolean> {
   if (currentSound) {
     try {
       await initAudioMode();
-      await currentSound.playAsync();
-    } catch (e) {}
+      const status = await currentSound.getStatusAsync();
+      if (status.isLoaded) {
+        await currentSound.playAsync();
+        return true;
+      }
+    } catch (e) {
+      console.warn('Failed to resume audio:', e);
+    }
   }
+  return false;
 }
 
 export async function seekAudio(millis: number): Promise<void> {
@@ -186,6 +215,7 @@ export async function setAudioRate(speed: number): Promise<void> {
 }
 
 export async function stopAndUnloadAudio(): Promise<void> {
+  activePlaybackId++;
   if (currentSound) {
     try {
       await currentSound.stopAsync();
