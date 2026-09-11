@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Reciter, Verse } from '../types';
 import {
   AyahTiming,
+  WordTiming,
   RECITER_TIMINGS,
   getSurahVerseTimings,
 } from '../data/reciterTimings';
@@ -111,9 +112,19 @@ export async function fetchSurahVerseTimings(
           for (let i = 0; i < timestamps.length; i++) {
             const item = timestamps[i];
             const ayahNum = parseInt(item.verse_key.split(':')[1], 10);
+            const rawSegments = item.segments || [];
+            const validWords: WordTiming[] = rawSegments
+              .filter((s: any) => Array.isArray(s) && s.length >= 3)
+              .map((s: any) => ({
+                wordIndex: s[0],
+                startMs: Math.max(0, s[1]),
+                endMs: Math.max(s[1] + 50, s[2]),
+              }));
+
             parsedTimings[ayahNum] = {
               startMs: Math.max(0, item.timestamp_from),
               endMs: Math.max(item.timestamp_from + 200, item.timestamp_to),
+              words: validWords.length > 0 ? validWords : undefined,
             };
           }
 
@@ -156,3 +167,68 @@ export async function fetchSurahVerseTimings(
   }
   return fallback;
 }
+
+/**
+ * Returns precise millisecond start/end timestamps for each word in an ayah.
+ * Prefers official verified segments from Quran.com, or computes a smooth,
+ * proportional Tajweed pacing curve across the verse's true audio duration.
+ */
+export function getAyahWordTimings(
+  ayahTiming: AyahTiming | undefined,
+  words: string[],
+  zeroIndexed: boolean = false,
+  customDurationMs?: number
+): WordTiming[] {
+  if (!words || words.length === 0) return [];
+  if (!ayahTiming) return [];
+
+  const wordCount = words.length;
+
+  // If verified word segments from Quran.com exist
+  if (ayahTiming.words && ayahTiming.words.length > 0) {
+    const wordMap = new Map<number, { startMs: number; endMs: number }>();
+    for (const s of ayahTiming.words) {
+      if (s.wordIndex >= 1 && s.wordIndex <= wordCount) {
+        wordMap.set(s.wordIndex, { startMs: s.startMs, endMs: s.endMs });
+      }
+    }
+
+    if (wordMap.size === wordCount) {
+      const shift = zeroIndexed ? (ayahTiming.startMs || 0) : 0;
+      const result: WordTiming[] = [];
+      for (let i = 1; i <= wordCount; i++) {
+        const seg = wordMap.get(i)!;
+        const s = Math.max(0, seg.startMs - shift);
+        const e = Math.max(s + 50, seg.endMs - shift);
+        result.push({ wordIndex: i, startMs: s, endMs: e });
+      }
+      return result;
+    }
+  }
+
+  // Fallback to continuous character-weighted proportional distribution
+  const startMs = zeroIndexed ? 0 : ayahTiming.startMs;
+  const totalDuration =
+    customDurationMs && customDurationMs > 400
+      ? customDurationMs
+      : Math.max(400, ayahTiming.endMs - ayahTiming.startMs);
+  const endMs = startMs + totalDuration;
+
+  // Proportional phonetic character-length weighting
+  const weights = words.map(w => Math.max(1, w.length));
+  const totalWeight = weights.reduce((sum, w) => sum + w, 0) || 1;
+
+  let cursor = startMs;
+  return words.map((_, i) => {
+    const wordDur = (weights[i] / totalWeight) * totalDuration;
+    const s = Math.round(cursor);
+    const e = i === words.length - 1 ? endMs : Math.round(cursor + wordDur);
+    cursor = e;
+    return {
+      wordIndex: i + 1,
+      startMs: s,
+      endMs: Math.max(s + 50, e),
+    };
+  });
+}
+

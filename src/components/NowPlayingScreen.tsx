@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -12,7 +12,7 @@ import {
 import { Ionicons, MaterialIcons, Feather } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { Surah, Verse, Reciter, LoopSettings } from '../types';
-import { getVersesForSurah } from '../services/quranService';
+import { getVersesForSurah, parseArabicWords } from '../services/quranService';
 import {
   loadAndPlayAyah,
   preloadUpcomingVerse,
@@ -27,6 +27,7 @@ import { prefetchVerseRange } from '../services/cacheService';
 import { LoopSettingsModal } from './LoopSettingsModal';
 import {
   AyahTiming,
+  WordTiming,
   RECITER_TIMINGS,
   getSurahVerseTimings,
 } from '../data/reciterTimings';
@@ -34,6 +35,7 @@ import { BASE_RECITERS } from '../data/reciters';
 import {
   getInstantTimings,
   fetchSurahVerseTimings,
+  getAyahWordTimings,
 } from '../services/timingService';
 import { SoundwaveVisualizer } from './SoundwaveVisualizer';
 import { BouncyTouchable } from './BouncyTouchable';
@@ -76,6 +78,8 @@ interface QuranCardViewProps {
   cardScale: Animated.Value;
   cardSlideX: Animated.Value;
   auraGlow: Animated.Value;
+  currentWordIndex: number;
+  words: string[];
 }
 
 const QuranCardView = React.memo<QuranCardViewProps>(({
@@ -86,6 +90,8 @@ const QuranCardView = React.memo<QuranCardViewProps>(({
   cardScale,
   cardSlideX,
   auraGlow,
+  currentWordIndex,
+  words,
 }) => {
   const cardScrollRef = useRef<ScrollView>(null);
 
@@ -129,18 +135,44 @@ const QuranCardView = React.memo<QuranCardViewProps>(({
             </View>
           )}
 
-          {/* Accurate Arabic Text with End-of-Ayah Ornament */}
+          {/* Word-By-Word Glowing Highlighting */}
           <Text style={styles.arabicText}>
-            {currentVerse?.arabicText ? (
+            {words.length > 0 ? (
               <>
-                {currentVerse.arabicText}
-                <Text style={styles.ayahEndSymbol}>
+                {words.map((word, index) => {
+                  const isSpoken = currentWordIndex >= 0 && index < currentWordIndex;
+                  const isCurrent = currentWordIndex === index;
+                  const isUpcoming = currentWordIndex >= 0 && index > currentWordIndex;
+
+                  return (
+                    <Text
+                      key={`${index}_${word}`}
+                      style={[
+                        styles.wordBase,
+                        isSpoken && styles.wordSpoken,
+                        isCurrent && styles.wordCurrent,
+                        isUpcoming && styles.wordUpcoming,
+                      ]}
+                    >
+                      {word}
+                      {index < words.length - 1 ? ' ' : ''}
+                    </Text>
+                  );
+                })}
+                <Text
+                  style={[
+                    styles.ayahEndSymbol,
+                    currentWordIndex >= words.length && styles.ayahEndSymbolActive,
+                  ]}
+                >
                   {' '}
                   ﴿{toArabicIndic(currentVerseNum)}﴾
                 </Text>
               </>
             ) : (
-              'Loading verse...'
+              <Text style={styles.wordBase}>
+                {currentVerse?.arabicText || 'Loading verse...'}
+              </Text>
             )}
           </Text>
 
@@ -261,6 +293,37 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
   const [versePlayCount, setVersePlayCount] = useState<number>(1);
   const [settingsModalVisible, setSettingsModalVisible] = useState<boolean>(false);
 
+  const [currentWordIndex, setCurrentWordIndex] = useState<number>(-1);
+  const lastWordIndexRef = useRef<number>(-1);
+
+  const currentVerse = useMemo(
+    () => verses.find(v => v.numberInSurah === currentVerseNum),
+    [verses, currentVerseNum]
+  );
+
+  const words = useMemo(() => {
+    if (!currentVerse?.arabicText) return [];
+    return parseArabicWords(currentVerse.arabicText);
+  }, [currentVerse?.arabicText]);
+
+  const currentWordTimings = useMemo(() => {
+    if (!currentVerse || words.length === 0) return [];
+    const timing = verseTimings[currentVerse.numberInSurah];
+    const isTimed = !!currentEffectiveReciter.isSurahBased;
+    return getAyahWordTimings(
+      timing,
+      words,
+      !isTimed,
+      currentVerseDurationMillis
+    );
+  }, [
+    currentVerse,
+    words,
+    verseTimings,
+    currentEffectiveReciter.isSurahBased,
+    currentVerseDurationMillis,
+  ]);
+
   // Refs for tracking state inside status callbacks
   const stateRef = useRef({
     currentVerseNum,
@@ -272,6 +335,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     versePlayCount,
     verses,
     verseTimings,
+    currentWordTimings,
     isLoopingTransition: false,
   });
 
@@ -285,6 +349,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     versePlayCount,
     verses,
     verseTimings,
+    currentWordTimings,
     isLoopingTransition: stateRef.current.isLoopingTransition,
   };
 
@@ -384,6 +449,8 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       setCurrentVerseNum(ayahNum);
       setVersePlayCount(iteration);
       setCurrentVersePositionMillis(0);
+      lastWordIndexRef.current = -1;
+      setCurrentWordIndex(-1);
       animateVerseChange();
 
       if (isTimed) {
@@ -432,12 +499,33 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
               }
             }
 
+            // Word-by-word active highlight tracking
+            const wordTimings = stateRef.current.currentWordTimings;
+            if (wordTimings && wordTimings.length > 0) {
+              let activeWord = -1;
+              for (let w = 0; w < wordTimings.length; w++) {
+                if (pos >= wordTimings[w].startMs && pos < wordTimings[w].endMs) {
+                  activeWord = w;
+                  break;
+                }
+              }
+              if (activeWord === -1 && pos >= wordTimings[wordTimings.length - 1].endMs) {
+                activeWord = wordTimings.length;
+              }
+              if (activeWord !== lastWordIndexRef.current) {
+                lastWordIndexRef.current = activeWord;
+                setCurrentWordIndex(activeWord);
+              }
+            }
+
             // Contiguous boundary check: smoothly updates current verse as audio plays gaplessly
             for (let a = from; a <= to; a++) {
               const t = timings[a];
               if (t && pos >= t.startMs && pos < t.endMs) {
                 if (curr !== a) {
                   setCurrentVerseNum(a);
+                  lastWordIndexRef.current = -1;
+                  setCurrentWordIndex(-1);
                   animateVerseChange();
                   try {
                     Haptics.selectionAsync();
@@ -497,6 +585,26 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
               setCurrentVersePositionMillis(status.positionMillis || 0);
               if (status.durationMillis && status.durationMillis > 0) {
                 setCurrentVerseDurationMillis(status.durationMillis);
+              }
+            }
+
+            // Word-by-word active highlight tracking for discrete reciters
+            const dPos = status.positionMillis || 0;
+            const wordTimings = stateRef.current.currentWordTimings;
+            if (wordTimings && wordTimings.length > 0) {
+              let activeWord = -1;
+              for (let w = 0; w < wordTimings.length; w++) {
+                if (dPos >= wordTimings[w].startMs && dPos < wordTimings[w].endMs) {
+                  activeWord = w;
+                  break;
+                }
+              }
+              if (activeWord === -1 && dPos >= wordTimings[wordTimings.length - 1].endMs) {
+                activeWord = wordTimings.length;
+              }
+              if (activeWord !== lastWordIndexRef.current) {
+                lastWordIndexRef.current = activeWord;
+                setCurrentWordIndex(activeWord);
               }
             }
 
@@ -608,6 +716,8 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
 
     if (count < settings.verseRepeatCount) {
       setVersePlayCount(count + 1);
+      lastWordIndexRef.current = -1;
+      setCurrentWordIndex(-1);
       const timing = timings[curr];
       if (timing) await seekAudio(timing.startMs);
       await resumeAudio();
@@ -622,6 +732,8 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       if (isMultipleMode) {
         await advanceToNextReciterAndLoop(curr);
       } else {
+        lastWordIndexRef.current = -1;
+        setCurrentWordIndex(-1);
         const timing = timings[curr];
         if (timing) await seekAudio(timing.startMs);
         await resumeAudio();
@@ -633,6 +745,8 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
           await advanceToNextReciterAndLoop(from);
         } else {
           setCurrentVerseNum(from);
+          lastWordIndexRef.current = -1;
+          setCurrentWordIndex(-1);
           animateVerseChange();
           const timing = timings[from];
           if (timing) await seekAudio(timing.startMs);
@@ -642,6 +756,8 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       } else {
         const nextAyah = curr + 1;
         setCurrentVerseNum(nextAyah);
+        lastWordIndexRef.current = -1;
+        setCurrentWordIndex(-1);
         animateVerseChange();
         const timing = timings[nextAyah];
         if (timing) await seekAudio(timing.startMs);
@@ -791,11 +907,15 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
 
     const prevAyah = Math.max(fromVerse, currentVerseNum - 1);
     if (isTimedReciter && isAudioLoaded()) {
+      lastWordIndexRef.current = -1;
+      setCurrentWordIndex(-1);
       setCurrentVerseNum(prevAyah);
       animateVerseChange();
       const timing = stateRef.current.verseTimings[prevAyah];
       if (timing) await seekAudio(timing.startMs);
     } else {
+      lastWordIndexRef.current = -1;
+      setCurrentWordIndex(-1);
       playVerse(prevAyah, 1, currentEffectiveReciter);
     }
   };
@@ -807,11 +927,15 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
 
     const nextAyah = Math.min(toVerse, currentVerseNum + 1);
     if (isTimedReciter && isAudioLoaded()) {
+      lastWordIndexRef.current = -1;
+      setCurrentWordIndex(-1);
       setCurrentVerseNum(nextAyah);
       animateVerseChange();
       const timing = stateRef.current.verseTimings[nextAyah];
       if (timing) await seekAudio(timing.startMs);
     } else {
+      lastWordIndexRef.current = -1;
+      setCurrentWordIndex(-1);
       playVerse(nextAyah, 1, currentEffectiveReciter);
     }
   };
@@ -826,7 +950,6 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     setLoopSettings(prev => ({ ...prev, mode: modes[nextIdx] }));
   };
 
-  const currentVerse = verses.find(v => v.numberInSurah === currentVerseNum);
   const totalVersesInRange = Math.max(1, toVerse - fromVerse + 1);
 
   // Show Bismillah header if non-Fatihah and non-Tawbah on Ayah 1
@@ -878,6 +1001,8 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         cardScale={cardScale}
         cardSlideX={cardSlideX}
         auraGlow={auraGlow}
+        currentWordIndex={currentWordIndex}
+        words={words}
       />
 
       {/* 4. PERMANENTLY STATIC BOTTOM SECTION WITH SCRUBBER & CONTROLS */}
@@ -1112,10 +1237,39 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
     marginBottom: 16,
   },
+  wordBase: {
+    fontFamily: 'UthmanicHafs',
+    fontSize: 28,
+    lineHeight: 56,
+    color: 'rgba(255, 255, 255, 0.75)',
+    textAlign: 'center',
+  },
+  wordSpoken: {
+    color: '#ffffff',
+    opacity: 1,
+  },
+  wordCurrent: {
+    color: '#fbbf24',
+    textShadowColor: 'rgba(251, 191, 36, 0.85)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 10,
+    opacity: 1,
+  },
+  wordUpcoming: {
+    color: 'rgba(226, 232, 240, 0.35)',
+    opacity: 0.45,
+    textShadowRadius: 0,
+  },
   ayahEndSymbol: {
     fontFamily: 'UthmanicHafs',
     color: '#9bbfff',
     fontSize: 22,
+  },
+  ayahEndSymbolActive: {
+    color: '#fbbf24',
+    textShadowColor: 'rgba(251, 191, 36, 0.75)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 8,
   },
   cardDivider: {
     width: 44,

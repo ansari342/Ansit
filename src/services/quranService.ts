@@ -18,6 +18,27 @@ function cleanVerseText(surahNumber: number, ayahNumber: number, text: string): 
   return text.replace(/^﻿/, '').trim();
 }
 
+// Unicode Waqf marks in Quranic text (small pause/stopping signs: U+06D6 to U+06DC, U+06DF to U+06E4, U+06E8)
+const WAQF_REGEX = /^[\u06D6-\u06DC\u06DF-\u06E4\u06E8\u08D4-\u08ED]+$/;
+
+/**
+ * Splits Arabic verse text into clean word tokens, attaching any standalone
+ * Quranic Waqf (stopping) symbols to the preceding word.
+ */
+export function parseArabicWords(arabicText: string): string[] {
+  if (!arabicText) return [];
+  const raw = arabicText.trim().split(/\s+/).filter(Boolean);
+  const words: string[] = [];
+  for (const token of raw) {
+    if (WAQF_REGEX.test(token) && words.length > 0) {
+      words[words.length - 1] += ' ' + token;
+    } else {
+      words.push(token);
+    }
+  }
+  return words;
+}
+
 const cache: Record<number, Verse[]> = { ...PRESET_VERSES };
 
 export async function getVersesForSurah(surahNumber: number): Promise<Verse[]> {

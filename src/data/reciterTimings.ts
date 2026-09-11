@@ -2,9 +2,16 @@ import { Verse } from '../types';
 import { CANONICAL_VERSE_PACING } from './canonicalVersePacing';
 import { RAAD_SURAH_DURATIONS_MS } from './raadDurations';
 
+export interface WordTiming {
+  wordIndex: number;
+  startMs: number;
+  endMs: number;
+}
+
 export interface AyahTiming {
   startMs: number;
   endMs: number;
+  words?: WordTiming[];
 }
 
 export const RECITER_TIMINGS: Record<string, Record<number, Record<number, AyahTiming>>> = {

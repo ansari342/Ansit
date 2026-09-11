@@ -72,7 +72,12 @@ export async function preloadUpcomingVerse(
     const uri = await getOrDownloadVerseAudio(reciter, surahNumber, ayahNumber);
     const { sound } = await Audio.Sound.createAsync(
       { uri },
-      { shouldPlay: false, rate: playbackSpeed, shouldCorrectPitch: true }
+      {
+        shouldPlay: false,
+        rate: playbackSpeed,
+        shouldCorrectPitch: true,
+        progressUpdateIntervalMillis: 60,
+      }
     );
     allActiveSounds.add(sound);
     nextSound = sound;
@@ -132,6 +137,7 @@ export async function loadAndPlayAyah(
       const status = await currentSound.getStatusAsync();
       if (status.isLoaded) {
         currentSound.setOnPlaybackStatusUpdate(createStatusHandler());
+        await currentSound.setStatusAsync({ progressUpdateIntervalMillis: 60 });
         if (status.rate !== playbackSpeed) {
           await currentSound.setRateAsync(playbackSpeed, true);
         }
@@ -169,6 +175,7 @@ export async function loadAndPlayAyah(
       if (currentRequestId === activePlaybackId) {
         currentSound = sound;
         currentSoundVerseKey = key;
+        await sound.setStatusAsync({ progressUpdateIntervalMillis: 60 });
         await sound.playAsync();
         return sound;
       } else {
@@ -190,7 +197,12 @@ export async function loadAndPlayAyah(
     // IMPORTANT: shouldPlay is false so audio never starts playing asynchronously before validation
     const { sound } = await Audio.Sound.createAsync(
       { uri },
-      { shouldPlay: false, rate: playbackSpeed, shouldCorrectPitch: true },
+      {
+        shouldPlay: false,
+        rate: playbackSpeed,
+        shouldCorrectPitch: true,
+        progressUpdateIntervalMillis: 60,
+      },
       createStatusHandler()
     );
     allActiveSounds.add(sound);
