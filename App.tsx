@@ -111,12 +111,13 @@ export default function App() {
 
   const [settingsModalVisible, setSettingsModalVisible] = useState<boolean>(false);
 
-  const handleStartPlayback = useCallback((
+  const handleStartPlayback = useCallback(async (
     surah: Surah,
     fromVerse: number,
     toVerse: number,
     reciter: Reciter
   ) => {
+    await stopAndUnloadAudio();
     const newSession = {
       surah,
       fromVerse,
@@ -144,8 +145,12 @@ export default function App() {
     toVerse: number,
     reciter: Reciter
   ) => {
-    setSession({ surah, fromVerse, toVerse, reciter });
-  }, []);
+    // Only update session if playback has NOT started, to preserve active playback session
+    // while user browses or picks reciters on HomeScreen.
+    if (!hasStartedPlaying) {
+      setSession({ surah, fromVerse, toVerse, reciter });
+    }
+  }, [hasStartedPlaying]);
 
   const handlePlaybackStateChange = useCallback((newState: {
     isPlaying: boolean;

@@ -67,6 +67,12 @@ export const RECITER_TIMINGS: Record<string, Record<number, Record<number, AyahT
       4: { startMs: 25000, endMs: 31500 },
       5: { startMs: 31500, endMs: 34300 },
     },
+    // Surah 108: Al-Kawthar (3 Ayahs)
+    108: {
+      1: { startMs: 4580, endMs: 10620 },
+      2: { startMs: 10620, endMs: 14800 },
+      3: { startMs: 14800, endMs: 23140 },
+    },
     // Surah 114: An-Nas (6 Ayahs)
     114: {
       1: { startMs: 3400, endMs: 9500 },
@@ -252,14 +258,24 @@ export function getSurahVerseTimings(
   }
 
   // 3. Opening Bismillah / Ta'awwudh offset
-  // Surah 1: Ayah 1 is Bismillah, preceded by 4.2s Ta'awwudh
-  // Surah 9: No Bismillah (starts at 0ms)
-  // Surahs 2-8, 10-114: Raad recites melodic Bismillah taking ~5.2s
-  let bismillahMs = 5200;
-  if (surahNumber === 1) {
-    bismillahMs = 4200;
-  } else if (surahNumber === 9) {
-    bismillahMs = 0;
+  // For standard reciters (Mishary, Abdul Basit, Husary, Sudais, Ghamdi, etc.),
+  // the audio track starts at 0ms (Ayah 1 begins at 0ms).
+  // For Raad Al-Kurdi:
+  // - Surah 1: Ayah 1 is Bismillah, preceded by 4.2s Ta'awwudh
+  // - Surah 9: No Bismillah (starts at 0ms)
+  // - Surah 67: Leading silence (~2.3s) + Bismillah = ~5.2s
+  // - Other Surahs: Raad recites introductory Bismillah taking ~3.8s
+  let bismillahMs = 0;
+  if (reciterId === 'raad') {
+    if (surahNumber === 1) {
+      bismillahMs = 4200;
+    } else if (surahNumber === 9) {
+      bismillahMs = 0;
+    } else if (surahNumber === 67) {
+      bismillahMs = 5200;
+    } else {
+      bismillahMs = 3800;
+    }
   }
 
   // 4. Canonical Tajweed pacing alignment (6,236 ayah precision curve)

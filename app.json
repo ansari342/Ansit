@@ -14,7 +14,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.ahsanansari.ansit",
-      "buildNumber": "11",
+      "buildNumber": "12",
       "infoPlist": {
         "UIBackgroundModes": [
           "audio"

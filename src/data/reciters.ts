@@ -109,6 +109,9 @@ export const BASE_RECITERS: Reciter[] = [
     name: 'Muhammad Siddiq Al-Minshawi (Mujawwad)',
     shortName: 'Minshawi (Mujawwad)',
     subfolder: 'Minshawy_Mujawwad_192kbps',
+    isSurahBased: true,
+    quranComId: 8,
+    surahUrlPattern: 'https://download.quranicaudio.com/qdc/siddiq_al-minshawi/mujawwad/{surah3}.mp3',
   },
   {
     id: 'abdulbasit_mujawwad',

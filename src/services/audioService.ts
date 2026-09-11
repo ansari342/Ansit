@@ -2,6 +2,9 @@ import { Audio, InterruptionModeIOS, InterruptionModeAndroid, AVPlaybackStatus }
 import { Reciter } from '../types';
 import { getOrDownloadVerseAudio } from './cacheService';
 
+// Global registry of all active Audio.Sound instances to prevent audio leaks / ghost playback
+const allActiveSounds = new Set<Audio.Sound>();
+
 let currentSound: Audio.Sound | null = null;
 let nextSound: Audio.Sound | null = null;
 let nextVerseKey: string | null = null;
@@ -56,11 +59,13 @@ export async function preloadUpcomingVerse(
 
   // Clear previous nextSound if different
   if (nextSound) {
-    try {
-      await nextSound.unloadAsync();
-    } catch (e) {}
+    const oldNext = nextSound;
     nextSound = null;
     nextVerseKey = null;
+    try {
+      allActiveSounds.delete(oldNext);
+      await oldNext.unloadAsync();
+    } catch (e) {}
   }
 
   try {
@@ -69,6 +74,7 @@ export async function preloadUpcomingVerse(
       { uri },
       { shouldPlay: false, rate: playbackSpeed, shouldCorrectPitch: true }
     );
+    allActiveSounds.add(sound);
     nextSound = sound;
     nextVerseKey = key;
   } catch (e) {
@@ -137,13 +143,20 @@ export async function loadAndPlayAyah(
     } catch (e) {}
   }
 
-  // Stop & unload previous sound asynchronously without blocking
-  const oldSound = currentSound;
-  currentSound = null;
-  currentSoundVerseKey = null;
-  if (oldSound) {
-    oldSound.stopAsync().then(() => oldSound.unloadAsync()).catch(() => {});
+  // Await complete stop & unload of previous sound to ensure ZERO sound overlap
+  if (currentSound) {
+    const oldSound = currentSound;
+    currentSound = null;
+    currentSoundVerseKey = null;
+    try {
+      allActiveSounds.delete(oldSound);
+      await oldSound.stopAsync();
+      await oldSound.unloadAsync();
+    } catch (e) {}
   }
+
+  // Check if superseded while awaiting unload
+  if (currentRequestId !== activePlaybackId) return null;
 
   // 2. Check if we already preloaded this in nextSound!
   if (nextSound && nextVerseKey === key) {
@@ -153,16 +166,18 @@ export async function loadAndPlayAyah(
 
     sound.setOnPlaybackStatusUpdate(createStatusHandler());
     try {
-      await sound.playAsync();
       if (currentRequestId === activePlaybackId) {
         currentSound = sound;
         currentSoundVerseKey = key;
+        await sound.playAsync();
         return sound;
       } else {
+        allActiveSounds.delete(sound);
         sound.stopAsync().then(() => sound.unloadAsync()).catch(() => {});
         return null;
       }
     } catch (e) {
+      allActiveSounds.delete(sound);
       console.warn('Preloaded sound play failed, fallback to fresh load', e);
     }
   }
@@ -172,17 +187,21 @@ export async function loadAndPlayAyah(
     const uri = await getOrDownloadVerseAudio(reciter, surahNumber, ayahNumber);
     if (currentRequestId !== activePlaybackId) return null;
 
+    // IMPORTANT: shouldPlay is false so audio never starts playing asynchronously before validation
     const { sound } = await Audio.Sound.createAsync(
       { uri },
-      { shouldPlay: true, rate: playbackSpeed, shouldCorrectPitch: true },
+      { shouldPlay: false, rate: playbackSpeed, shouldCorrectPitch: true },
       createStatusHandler()
     );
+    allActiveSounds.add(sound);
 
     if (currentRequestId === activePlaybackId) {
       currentSound = sound;
       currentSoundVerseKey = key;
+      await sound.playAsync();
       return sound;
     } else {
+      allActiveSounds.delete(sound);
       sound.stopAsync().then(() => sound.unloadAsync()).catch(() => {});
       return null;
     }
@@ -238,19 +257,20 @@ export async function setAudioRate(speed: number): Promise<void> {
 
 export async function stopAndUnloadAudio(): Promise<void> {
   activePlaybackId++;
-  if (currentSound) {
-    try {
-      await currentSound.stopAsync();
-      await currentSound.unloadAsync();
-    } catch (e) {}
-    currentSound = null;
-    currentSoundVerseKey = null;
-  }
-  if (nextSound) {
-    try {
-      await nextSound.unloadAsync();
-    } catch (e) {}
-    nextSound = null;
-    nextVerseKey = null;
-  }
+  currentSound = null;
+  currentSoundVerseKey = null;
+  nextSound = null;
+  nextVerseKey = null;
+
+  const soundsToUnload = Array.from(allActiveSounds);
+  allActiveSounds.clear();
+
+  await Promise.all(
+    soundsToUnload.map(async s => {
+      try {
+        await s.stopAsync();
+        await s.unloadAsync();
+      } catch (e) {}
+    })
+  );
 }

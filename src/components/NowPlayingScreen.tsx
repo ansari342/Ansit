@@ -299,32 +299,34 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       }
 
       const loaded = await getVersesForSurah(surah.number);
-      if (isMounted) {
-        setVerses(loaded);
-        const initialTimings = getInstantTimings(
-          rec,
-          surah.number,
-          loaded,
-          durationMillis > 1000 ? durationMillis : 180000
-        );
-        setVerseTimings(initialTimings);
-        stateRef.current.verseTimings = initialTimings;
+      if (!isMounted) return;
 
-        if (rec.quranComId) {
-          fetchSurahVerseTimings(
+      let exactTimings: Record<number, AyahTiming> | null = null;
+      if (rec.quranComId) {
+        try {
+          exactTimings = await fetchSurahVerseTimings(
             rec,
             surah.number,
             loaded,
             durationMillis
-          )
-            .then(exactTimings => {
-              if (isMounted && exactTimings && Object.keys(exactTimings).length > 0) {
-                setVerseTimings(exactTimings);
-                stateRef.current.verseTimings = exactTimings;
-              }
-            })
-            .catch(() => {});
-        }
+          );
+        } catch (e) {}
+      }
+
+      const initialTimings =
+        exactTimings && Object.keys(exactTimings).length > 0
+          ? exactTimings
+          : getInstantTimings(
+              rec,
+              surah.number,
+              loaded,
+              durationMillis > 1000 ? durationMillis : 180000
+            );
+
+      if (isMounted) {
+        setVerseTimings(initialTimings);
+        stateRef.current.verseTimings = initialTimings;
+        setVerses(loaded);
       }
     })();
 
@@ -332,7 +334,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       isMounted = false;
       stopAndUnloadAudio();
     };
-  }, [surah.number, reciter.id, fromVerse, toVerse]);
+  }, [surah.number, reciter.id, fromVerse, toVerse, sessionId]);
 
   // Re-calculate precise verse timings whenever audio duration is loaded
   const updateTimingsWithDuration = useCallback(

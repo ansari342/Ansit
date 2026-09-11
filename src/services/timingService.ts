@@ -15,7 +15,7 @@ function getCacheKey(reciterId: string, surahNumber: number): string {
   return `${reciterId}_${surahNumber}`;
 }
 
-const STORAGE_PREFIX = '@ayah_timings_v2_';
+const STORAGE_PREFIX = '@ayah_timings_v3_';
 
 /**
  * Returns instantaneous timings synchronously:
@@ -47,7 +47,11 @@ export function getInstantTimings(
   }
 
   const timings = getSurahVerseTimings(actualReciter.id, surahNumber, verses, durationToUse);
-  memoryTimingsCache.set(key, timings);
+  // Do NOT cache fallback timings in memoryTimingsCache if reciter has quranComId,
+  // so fetchSurahVerseTimings() can fetch exact millisecond timestamps without being blocked.
+  if (!actualReciter.quranComId) {
+    memoryTimingsCache.set(key, timings);
+  }
   return timings;
 }
 
@@ -140,13 +144,15 @@ export async function fetchSurahVerseTimings(
     }
   }
 
-  // 5. Fallback to phonetic text aligner
+  // 5. Fallback to canonical Tajweed / acoustic aligner
   const fallback = getSurahVerseTimings(
-    reciter.id,
+    actualReciter.id,
     surahNumber,
     verses,
     totalDurationMs && totalDurationMs > 1000 ? totalDurationMs : 180000
   );
-  memoryTimingsCache.set(key, fallback);
+  if (!actualReciter.quranComId) {
+    memoryTimingsCache.set(key, fallback);
+  }
   return fallback;
 }
