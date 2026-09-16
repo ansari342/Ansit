@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Ansit",
+    "name": "Aya",
     "slug": "ansit",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -16,6 +16,8 @@
       "bundleIdentifier": "com.ahsanansari.ansit",
       "buildNumber": "15",
       "infoPlist": {
+        "CFBundleDisplayName": "Aya",
+        "CFBundleName": "Aya",
         "UIBackgroundModes": [
           "audio"
         ],

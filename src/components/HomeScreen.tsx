@@ -341,10 +341,10 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#080b11" />
 
-      {/* Top Header: Ansit Brand */}
+      {/* Top Header: Aya Brand */}
       <View style={styles.header}>
         <View style={styles.headerLeft}>
-          <Text style={styles.headerTitleAnsit}>Ansit</Text>
+          <Text style={styles.headerTitleAya}>Aya</Text>
         </View>
 
         <View style={styles.headerRight}>
@@ -613,7 +613,7 @@ const styles = StyleSheet.create({
     alignItems: 'baseline',
     gap: 8,
   },
-  headerTitleAnsit: {
+  headerTitleAya: {
     color: '#ffffff',
     fontSize: 26,
     fontWeight: '800',

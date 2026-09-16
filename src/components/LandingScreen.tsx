@@ -334,15 +334,15 @@ export const LandingScreen: React.FC<LandingScreenProps> = ({
         ]}
       >
         {/* Main Title Card */}
-        <Text style={styles.mainTitle}>Ansit</Text>
+        <Text style={styles.mainTitle}>Aya</Text>
 
-        {/* Quranic Ayah Referencing Ansit in Blue */}
+        {/* Quranic Ayah Referencing Aya in Blue */}
         <Text style={styles.arabicAyahQuote}>
-          وَأَنْصِتُوا لَعَلَّكُمْ تُرْحَمُونَ
+          لِّيَدَّبَّرُوا آيَاتِهِ
         </Text>
 
         {/* Minimalist Tagline */}
-        <Text style={styles.tagline}>Custom Quran Recitation</Text>
+        <Text style={styles.tagline}>Mindful Quran Recitation</Text>
 
         {/* Suggestion Card for Most Recently Played */}
         <TouchableOpacity
