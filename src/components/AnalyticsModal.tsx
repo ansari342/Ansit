@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import {
   Modal,
   View,
@@ -9,14 +9,16 @@ import {
   SafeAreaView,
   Dimensions,
 } from 'react-native';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import {
   getAnalytics,
   getTopSurah,
+  getTopSurahsByTime,
   getTopVerse,
   getTopReciter,
   UserAnalytics,
+  DEFAULT_ANALYTICS,
 } from '../services/analyticsService';
 import { SURAHS } from '../data/surahs';
 import { BouncyTouchable } from './BouncyTouchable';
@@ -34,50 +36,13 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
   onClose,
   onPlayTopSession,
 }) => {
-  const [analytics, setAnalytics] = useState<UserAnalytics | null>(null);
-  const [selectedSurahNumber, setSelectedSurahNumber] = useState<number>(67);
+  // Always initialize with safe DEFAULT_ANALYTICS so hooks never mismatch and render never crashes
+  const [analytics, setAnalytics] = useState<UserAnalytics>(DEFAULT_ANALYTICS);
+  const [selectedSurahNumber, setSelectedSurahNumber] = useState<number>(2);
+  const [heatmapMode, setHeatmapMode] = useState<'time' | 'sessions'>('time');
 
-  useEffect(() => {
-    if (visible) {
-      getAnalytics().then(data => {
-        setAnalytics(data);
-        const top = getTopSurah(data);
-        if (top) {
-          setSelectedSurahNumber(top.surah.number);
-        }
-      });
-    }
-  }, [visible]);
-
-  if (!analytics) return null;
-
-  const topSurah = getTopSurah(analytics);
-  const topVerse = getTopVerse(analytics);
-  const topReciter = getTopReciter(analytics);
-
-  const formatTime = (totalMinutes: number): string => {
-    const hours = Math.floor(totalMinutes / 60);
-    const mins = totalMinutes % 60;
-    if (hours > 0) {
-      return `${hours}h ${mins}m`;
-    }
-    return `${mins}m`;
-  };
-
-  const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-  const maxWeeklyMin = Math.max(1, ...Object.values(analytics.weeklyMinutes));
-
-  // 114 Surahs GitHub Heatmap calculation
-  const distinctSurahsPlayed = Object.keys(analytics.surahCounts || {}).filter(
-    num => (analytics.surahCounts[Number(num)] || 0) > 0
-  ).length;
-  const quranPercentage = Math.round((distinctSurahsPlayed / 114) * 100);
-
-  const selectedSurah = SURAHS.find(s => s.number === selectedSurahNumber) || SURAHS[66];
-  const selectedSurahPlays = analytics.surahCounts[selectedSurah.number] || 0;
-
-  // 19 columns x 6 rows = 114 Surahs
-  const heatmapColumns = React.useMemo(() => {
+  // 19 columns x 6 rows = 114 Surahs (Unconditional useMemo hook at top level)
+  const heatmapColumns = useMemo(() => {
     const cols: (typeof SURAHS)[] = [];
     const rowsPerCol = 6;
     for (let c = 0; c < 19; c++) {
@@ -86,12 +51,75 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
     return cols;
   }, []);
 
-  const getSurahColor = (count: number) => {
-    if (count === 0) return '#131929';
-    if (count <= 2) return '#1e3a68'; // Level 1 - subtle deep blue
-    if (count <= 5) return '#2563eb'; // Level 2 - vibrant blue
-    if (count <= 9) return '#38bdf8'; // Level 3 - bright sky cyan
-    return '#9bbfff';                 // Level 4 - signature glowing sapphire
+  useEffect(() => {
+    let isMounted = true;
+    if (visible) {
+      getAnalytics()
+        .then(data => {
+          if (isMounted && data) {
+            setAnalytics(data);
+            const top = getTopSurah(data);
+            if (top && top.surah) {
+              setSelectedSurahNumber(top.surah.number);
+            }
+          }
+        })
+        .catch(err => {
+          console.warn('AnalyticsModal load error:', err);
+        });
+    }
+    return () => {
+      isMounted = false;
+    };
+  }, [visible]);
+
+  const topSurah = getTopSurah(analytics);
+  const topSurahsByTime = getTopSurahsByTime(analytics, 3);
+  const topVerse = getTopVerse(analytics);
+  const topReciter = getTopReciter(analytics);
+
+  const formatTime = (totalMinutes: number): string => {
+    const mins = Math.max(0, Math.round(totalMinutes || 0));
+    const hours = Math.floor(mins / 60);
+    const remMins = mins % 60;
+    if (hours > 0) {
+      return `${hours}h ${remMins}m`;
+    }
+    return `${remMins}m`;
+  };
+
+  const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const weeklyMap = analytics?.weeklyMinutes || DEFAULT_ANALYTICS.weeklyMinutes;
+  const maxWeeklyMin = Math.max(1, ...Object.values(weeklyMap));
+
+  const surahMinutesMap = analytics?.surahMinutes || DEFAULT_ANALYTICS.surahMinutes;
+  const surahCountsMap = analytics?.surahCounts || DEFAULT_ANALYTICS.surahCounts;
+
+  // 114 Surahs GitHub Heatmap coverage calculation
+  const distinctSurahsPlayed = Object.keys(surahMinutesMap).filter(
+    num => (surahMinutesMap[Number(num)] || 0) > 0 || (surahCountsMap[Number(num)] || 0) > 0
+  ).length;
+  const quranPercentage = Math.round((distinctSurahsPlayed / 114) * 100);
+
+  const selectedSurah = SURAHS.find(s => s.number === selectedSurahNumber) || SURAHS[1];
+  const selectedSurahMinutes = Math.round(surahMinutesMap[selectedSurah.number] || 0);
+  const selectedSurahPlays = surahCountsMap[selectedSurah.number] || 0;
+
+  // Color coding by Listening Time (Minutes) vs Sessions
+  const getSurahColorByTime = (minutes: number): { bg: string; text: string } => {
+    if (minutes <= 0) return { bg: '#131929', text: '#475569' };
+    if (minutes < 10) return { bg: '#1e3a68', text: '#cbd5e1' }; // Level 1: 1-9m (Subtle deep blue)
+    if (minutes < 25) return { bg: '#2563eb', text: '#ffffff' }; // Level 2: 10-24m (Vibrant royal blue)
+    if (minutes < 45) return { bg: '#38bdf8', text: '#080b11' }; // Level 3: 25-44m (Bright cyan sky)
+    return { bg: '#9bbfff', text: '#080b11' };                   // Level 4: 45m+ (Glowing sapphire)
+  };
+
+  const getSurahColorBySessions = (count: number): { bg: string; text: string } => {
+    if (count <= 0) return { bg: '#131929', text: '#475569' };
+    if (count <= 2) return { bg: '#1e3a68', text: '#cbd5e1' };
+    if (count <= 5) return { bg: '#2563eb', text: '#ffffff' };
+    if (count <= 9) return { bg: '#38bdf8', text: '#080b11' };
+    return { bg: '#9bbfff', text: '#080b11' };
   };
 
   return (
@@ -106,7 +134,7 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
         <View style={styles.header}>
           <View style={styles.headerLeft}>
             <Text style={styles.headerTitle}>Listening Insights</Text>
-            <Text style={styles.headerSubtitleArabic}>الإِحْصَائِيَّاتُ وَالتَّدَبُّرُ</Text>
+            <Text style={styles.headerSubtitle}>Aya • Reflection & Memorization</Text>
           </View>
           <TouchableOpacity
             style={styles.closeBtn}
@@ -140,7 +168,7 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
               <View style={styles.streakBadge}>
                 <Text style={styles.streakIcon}>🔥</Text>
                 <Text style={styles.streakText}>
-                  {analytics.currentStreakDays} Day Reflection Streak
+                  {analytics.currentStreakDays || 1} Day Reflection Streak
                 </Text>
               </View>
             </View>
@@ -150,20 +178,20 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
           <View style={styles.statsGrid}>
             <View style={styles.statTile}>
               <View style={styles.statIconWrap}>
+                <Ionicons name="time-outline" size={20} color="#38bdf8" />
+              </View>
+              <Text style={styles.statNumber}>{formatTime(analytics.totalMinutes)}</Text>
+              <Text style={styles.statLabel}>Total Time</Text>
+              <Text style={styles.statSublabel}>Time listened</Text>
+            </View>
+
+            <View style={styles.statTile}>
+              <View style={styles.statIconWrap}>
                 <Ionicons name="headset-outline" size={20} color="#9bbfff" />
               </View>
               <Text style={styles.statNumber}>{analytics.totalSessions}</Text>
               <Text style={styles.statLabel}>Total Listens</Text>
               <Text style={styles.statSublabel}>Sessions</Text>
-            </View>
-
-            <View style={styles.statTile}>
-              <View style={styles.statIconWrap}>
-                <Ionicons name="time-outline" size={20} color="#38bdf8" />
-              </View>
-              <Text style={styles.statNumber}>{formatTime(analytics.totalMinutes)}</Text>
-              <Text style={styles.statLabel}>Reflection Time</Text>
-              <Text style={styles.statSublabel}>Time listened</Text>
             </View>
 
             <View style={styles.statTile}>
@@ -187,20 +215,72 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
             </View>
           </View>
 
-          {/* GITHUB-STYLE SURAH HEATMAP (All 114 Surahs) */}
+          {/* GITHUB-STYLE SURAH HEATMAP (All 114 Surahs Color Coded by Time) */}
           <View style={styles.heatmapCard}>
             <View style={styles.heatmapHeader}>
               <View style={styles.heatmapTitleCol}>
                 <View style={styles.heatmapTitleRow}>
                   <Ionicons name="grid" size={13} color="#9bbfff" style={{ marginRight: 6 }} />
-                  <Text style={styles.heatmapTitle}>SURAH RECITATION HEATMAP</Text>
+                  <Text style={styles.heatmapTitle}>SURAH TIME HEATMAP</Text>
                 </View>
-                <Text style={styles.heatmapSub}>All 114 Surahs of the Holy Qur'an</Text>
+                <Text style={styles.heatmapSub}>
+                  All 114 Surahs color-coded by {heatmapMode === 'time' ? 'listening time' : 'sessions'}
+                </Text>
               </View>
-              <View style={styles.coverageBadge}>
-                <Text style={styles.coverageText}>{distinctSurahsPlayed}/114 Recited</Text>
-                <Text style={styles.coveragePercent}>{quranPercentage}% Coverage</Text>
+
+              {/* Mode Toggle: Time vs Sessions */}
+              <View style={styles.modeToggleContainer}>
+                <TouchableOpacity
+                  style={[
+                    styles.modeToggleBtn,
+                    heatmapMode === 'time' && styles.modeToggleBtnActive,
+                  ]}
+                  onPress={() => {
+                    try {
+                      Haptics.selectionAsync();
+                    } catch (e) {}
+                    setHeatmapMode('time');
+                  }}
+                >
+                  <Text
+                    style={[
+                      styles.modeToggleText,
+                      heatmapMode === 'time' && styles.modeToggleTextActive,
+                    ]}
+                  >
+                    By Time
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.modeToggleBtn,
+                    heatmapMode === 'sessions' && styles.modeToggleBtnActive,
+                  ]}
+                  onPress={() => {
+                    try {
+                      Haptics.selectionAsync();
+                    } catch (e) {}
+                    setHeatmapMode('sessions');
+                  }}
+                >
+                  <Text
+                    style={[
+                      styles.modeToggleText,
+                      heatmapMode === 'sessions' && styles.modeToggleTextActive,
+                    ]}
+                  >
+                    Sessions
+                  </Text>
+                </TouchableOpacity>
               </View>
+            </View>
+
+            {/* Quran Coverage Summary Row */}
+            <View style={styles.coverageSummaryRow}>
+              <Text style={styles.coverageSummaryLabel}>
+                {distinctSurahsPlayed} of 114 Surahs Listened
+              </Text>
+              <Text style={styles.coverageSummaryPercent}>{quranPercentage}% Coverage</Text>
             </View>
 
             {/* Quran Coverage Progress Bar */}
@@ -223,9 +303,13 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
                 {heatmapColumns.map((col, colIdx) => (
                   <View key={colIdx} style={styles.heatmapColumn}>
                     {col.map(surah => {
-                      const count = analytics.surahCounts[surah.number] || 0;
+                      const mins = surahMinutesMap[surah.number] || 0;
+                      const count = surahCountsMap[surah.number] || 0;
                       const isSelected = surah.number === selectedSurahNumber;
-                      const cellColor = getSurahColor(count);
+                      const colors =
+                        heatmapMode === 'time'
+                          ? getSurahColorByTime(mins)
+                          : getSurahColorBySessions(count);
 
                       return (
                         <TouchableOpacity
@@ -233,7 +317,7 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
                           activeOpacity={0.65}
                           style={[
                             styles.heatmapCell,
-                            { backgroundColor: cellColor },
+                            { backgroundColor: colors.bg },
                             isSelected && styles.heatmapCellSelected,
                           ]}
                           onPress={() => {
@@ -242,7 +326,11 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
                             } catch (e) {}
                             setSelectedSurahNumber(surah.number);
                           }}
-                        />
+                        >
+                          <Text style={[styles.heatmapCellNumber, { color: colors.text }]}>
+                            {surah.number}
+                          </Text>
+                        </TouchableOpacity>
                       );
                     })}
                   </View>
@@ -250,17 +338,19 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
               </View>
             </ScrollView>
 
-            {/* GitHub-style Activity Legend */}
+            {/* GitHub-style Activity Legend (Color coded by time) */}
             <View style={styles.legendRow}>
-              <Text style={styles.legendLeftText}>Tap any cell to inspect</Text>
+              <Text style={styles.legendLeftText}>Tap any Surah square to inspect</Text>
               <View style={styles.legendRight}>
-                <Text style={styles.legendText}>0</Text>
+                <Text style={styles.legendText}>{heatmapMode === 'time' ? '0m' : '0'}</Text>
                 <View style={[styles.legendCell, { backgroundColor: '#131929' }]} />
                 <View style={[styles.legendCell, { backgroundColor: '#1e3a68' }]} />
                 <View style={[styles.legendCell, { backgroundColor: '#2563eb' }]} />
                 <View style={[styles.legendCell, { backgroundColor: '#38bdf8' }]} />
                 <View style={[styles.legendCell, { backgroundColor: '#9bbfff' }]} />
-                <Text style={styles.legendText}>10+</Text>
+                <Text style={styles.legendText}>
+                  {heatmapMode === 'time' ? '45m+' : '10+'}
+                </Text>
               </View>
             </View>
 
@@ -288,22 +378,38 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
 
                 <View style={styles.inspectionBottom}>
                   <View style={styles.inspectionStatsRow}>
-                    <Ionicons
-                      name={selectedSurahPlays > 0 ? 'headset' : 'headset-outline'}
-                      size={14}
-                      color={selectedSurahPlays > 0 ? '#9bbfff' : '#64748b'}
-                      style={{ marginRight: 6 }}
-                    />
-                    <Text style={styles.inspectionPlaysText}>
-                      {selectedSurahPlays > 0
-                        ? `${selectedSurahPlays} ${selectedSurahPlays === 1 ? 'Listen' : 'Listens'}`
-                        : 'No recorded listens yet'}
-                    </Text>
-                    {selectedSurahPlays >= 10 && (
-                      <View style={styles.topPill}>
-                        <Text style={styles.topPillText}>🔥 Most Active</Text>
-                      </View>
-                    )}
+                    {/* Time Listened Badge */}
+                    <View style={styles.timePill}>
+                      <Ionicons
+                        name="time"
+                        size={13}
+                        color={selectedSurahMinutes > 0 ? '#38bdf8' : '#64748b'}
+                        style={{ marginRight: 4 }}
+                      />
+                      <Text
+                        style={[
+                          styles.timePillText,
+                          selectedSurahMinutes === 0 && { color: '#64748b' },
+                        ]}
+                      >
+                        {selectedSurahMinutes > 0
+                          ? `${formatTime(selectedSurahMinutes)} listened`
+                          : '0m listened'}
+                      </Text>
+                    </View>
+
+                    {/* Sessions Count Badge */}
+                    <View style={styles.sessionPill}>
+                      <Ionicons
+                        name="headset-outline"
+                        size={12}
+                        color="#94a3b8"
+                        style={{ marginRight: 4 }}
+                      />
+                      <Text style={styles.sessionPillText}>
+                        {selectedSurahPlays} {selectedSurahPlays === 1 ? 'session' : 'sessions'}
+                      </Text>
+                    </View>
                   </View>
 
                   {onPlayTopSession && (
@@ -319,6 +425,56 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
                     </BouncyTouchable>
                   )}
                 </View>
+              </View>
+            )}
+
+            {/* Top Surahs Ranked by Listening Time */}
+            {topSurahsByTime.length > 0 && (
+              <View style={styles.topTimeSection}>
+                <Text style={styles.topTimeSectionTitle}>MOST LISTENED BY TIME</Text>
+                {topSurahsByTime.map((item, idx) => {
+                  const maxMins = topSurahsByTime[0]?.minutes || 1;
+                  const pct = Math.max(12, Math.round((item.minutes / maxMins) * 100));
+                  return (
+                    <TouchableOpacity
+                      key={item.surah.number}
+                      activeOpacity={0.75}
+                      style={styles.topTimeRow}
+                      onPress={() => {
+                        try {
+                          Haptics.selectionAsync();
+                        } catch (e) {}
+                        setSelectedSurahNumber(item.surah.number);
+                      }}
+                    >
+                      <View style={styles.topTimeRankBadge}>
+                        <Text style={styles.topTimeRankText}>#{idx + 1}</Text>
+                      </View>
+                      <View style={styles.topTimeInfo}>
+                        <View style={styles.topTimeNameRow}>
+                          <Text style={styles.topTimeSurahName}>
+                            Surah {item.surah.englishName}
+                          </Text>
+                          <Text style={styles.topTimeDurationText}>
+                            {formatTime(item.minutes)} ({item.count} sessions)
+                          </Text>
+                        </View>
+                        <View style={styles.topTimeBarTrack}>
+                          <View
+                            style={[
+                              styles.topTimeBarFill,
+                              {
+                                width: `${pct}%`,
+                                backgroundColor:
+                                  idx === 0 ? '#9bbfff' : idx === 1 ? '#38bdf8' : '#2563eb',
+                              },
+                            ]}
+                          />
+                        </View>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })}
               </View>
             )}
           </View>
@@ -370,37 +526,6 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
             </View>
           )}
 
-          {/* HIGHLIGHT 2: Favorite Surah */}
-          {topSurah && (
-            <View style={styles.highlightCard}>
-              <View style={styles.highlightHeader}>
-                <View style={styles.highlightBadge}>
-                  <Ionicons name="book-outline" size={12} color="#9bbfff" style={{ marginRight: 4 }} />
-                  <Text style={styles.highlightBadgeText}>FAVORITE SURAH</Text>
-                </View>
-                <Text style={styles.highlightArabicTitle}>
-                  {topSurah.surah.name}
-                </Text>
-              </View>
-
-              <View style={styles.surahHighlightRow}>
-                <View>
-                  <Text style={styles.surahHighlightName}>
-                    Surah {topSurah.surah.englishName}
-                  </Text>
-                  <Text style={styles.surahHighlightSub}>
-                    {topSurah.surah.numberOfAyahs} Verses • {topSurah.surah.revelationType}
-                  </Text>
-                </View>
-
-                <View style={styles.surahPlayBadge}>
-                  <Text style={styles.surahPlayCount}>{topSurah.count}</Text>
-                  <Text style={styles.surahPlayLabel}>Listens</Text>
-                </View>
-              </View>
-            </View>
-          )}
-
           {/* Weekly Reflection Activity Bar Chart */}
           <View style={styles.chartCard}>
             <View style={styles.chartHeader}>
@@ -410,7 +535,7 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
 
             <View style={styles.barsContainer}>
               {days.map(day => {
-                const mins = analytics.weeklyMinutes[day] || 0;
+                const mins = weeklyMap[day] || 0;
                 const barHeight = Math.max(8, (mins / maxWeeklyMin) * 80);
                 const isToday = day === days[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1];
 
@@ -461,64 +586,65 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 20,
-    paddingVertical: 14,
+    paddingTop: 14,
+    paddingBottom: 14,
     borderBottomWidth: 1,
-    borderBottomColor: '#141d2f',
+    borderBottomColor: '#151c2c',
   },
   headerLeft: {
-    flex: 1,
+    flexDirection: 'column',
   },
   headerTitle: {
     color: '#ffffff',
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: '800',
-    letterSpacing: -0.3,
+    letterSpacing: -0.4,
   },
-  headerSubtitleArabic: {
+  headerSubtitle: {
     color: '#9bbfff',
     fontSize: 13,
-    fontWeight: '700',
+    fontWeight: '600',
     marginTop: 2,
   },
   closeBtn: {
     width: 36,
     height: 36,
     borderRadius: 18,
-    backgroundColor: '#151f33',
+    backgroundColor: '#131929',
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
-    borderColor: '#243452',
+    borderColor: '#1e293b',
   },
   scrollContent: {
-    padding: 20,
-    paddingBottom: 40,
+    paddingHorizontal: 18,
+    paddingTop: 18,
+    paddingBottom: 48,
   },
   userCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#0e1626',
+    backgroundColor: '#101624',
     borderRadius: 20,
     padding: 18,
-    marginBottom: 20,
     borderWidth: 1,
-    borderColor: '#1d2c47',
+    borderColor: '#1e293b',
+    marginBottom: 16,
   },
   userAvatarContainer: {
     marginRight: 16,
   },
   userAvatar: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
+    width: 58,
+    height: 58,
+    borderRadius: 29,
     backgroundColor: '#9bbfff',
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#9bbfff',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.4,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
     shadowRadius: 10,
-    elevation: 6,
   },
   userInfo: {
     flex: 1,
@@ -527,54 +653,55 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 19,
     fontWeight: '800',
-    letterSpacing: -0.2,
-    marginBottom: 2,
+    letterSpacing: -0.3,
   },
   userRole: {
-    color: '#8a95aa',
-    fontSize: 12,
-    fontWeight: '600',
+    color: '#94a3b8',
+    fontSize: 13,
+    fontWeight: '500',
+    marginTop: 2,
     marginBottom: 8,
   },
   streakBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#182438',
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(229, 184, 105, 0.14)',
     paddingHorizontal: 10,
     paddingVertical: 4,
     borderRadius: 12,
-    alignSelf: 'flex-start',
     borderWidth: 1,
-    borderColor: '#2b3f63',
+    borderColor: 'rgba(229, 184, 105, 0.35)',
   },
   streakIcon: {
     fontSize: 12,
-    marginRight: 4,
+    marginRight: 5,
   },
   streakText: {
-    color: '#38bdf8',
-    fontSize: 11,
+    color: '#e5b869',
+    fontSize: 12,
     fontWeight: '700',
   },
   statsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 12,
-    marginBottom: 20,
+    justifyContent: 'space-between',
+    marginBottom: 16,
   },
   statTile: {
-    width: (width - 40 - 12) / 2,
-    backgroundColor: '#0c1220',
+    width: (width - 48) / 2,
+    backgroundColor: '#101624',
     borderRadius: 18,
     padding: 16,
+    marginBottom: 12,
     borderWidth: 1,
-    borderColor: '#19243a',
+    borderColor: '#1e293b',
   },
   statIconWrap: {
     width: 36,
     height: 36,
     borderRadius: 10,
-    backgroundColor: '#131b2e',
+    backgroundColor: '#161f33',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 10,
@@ -582,253 +709,34 @@ const styles = StyleSheet.create({
   statNumber: {
     color: '#ffffff',
     fontSize: 22,
-    fontWeight: '900',
+    fontWeight: '800',
     letterSpacing: -0.5,
-    marginBottom: 2,
   },
   statLabel: {
-    color: '#94a3b8',
-    fontSize: 12,
-    fontWeight: '600',
+    color: '#cbd5e1',
+    fontSize: 13,
+    fontWeight: '700',
+    marginTop: 2,
   },
   statSublabel: {
     color: '#64748b',
     fontSize: 11,
     fontWeight: '500',
-    marginTop: 2,
+    marginTop: 1,
   },
-  highlightCard: {
-    backgroundColor: '#0d1526',
-    borderRadius: 20,
-    padding: 18,
-    marginBottom: 16,
-    borderWidth: 1.2,
-    borderColor: '#1e2e4c',
-  },
-  highlightHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 12,
-  },
-  highlightBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#142036',
-    paddingHorizontal: 9,
-    paddingVertical: 4,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#24375b',
-  },
-  highlightBadgeText: {
-    color: '#9bbfff',
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 0.8,
-  },
-  highlightCountBadge: {
-    color: '#38bdf8',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  highlightArabicTitle: {
-    color: '#9bbfff',
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  highlightAyahTitle: {
-    color: '#ffffff',
-    fontSize: 18,
-    fontWeight: '800',
-    letterSpacing: -0.3,
-    marginBottom: 10,
-  },
-  arabicSnippetBox: {
-    backgroundColor: '#090d17',
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: '#172236',
-  },
-  arabicSnippetText: {
-    color: '#e2e8f0',
-    fontSize: 17,
-    lineHeight: 28,
-    textAlign: 'right',
-    fontWeight: '600',
-  },
-  highlightDescription: {
-    color: '#8a95aa',
-    fontSize: 12,
-    lineHeight: 18,
-    marginBottom: 14,
-  },
-  playHighlightBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#9bbfff',
-    paddingVertical: 10,
-    borderRadius: 12,
-  },
-  playHighlightBtnText: {
-    color: '#080b11',
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  surahHighlightRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  surahHighlightName: {
-    color: '#ffffff',
-    fontSize: 19,
-    fontWeight: '800',
-    letterSpacing: -0.3,
-    marginBottom: 3,
-  },
-  surahHighlightSub: {
-    color: '#8a95aa',
-    fontSize: 12,
-    fontWeight: '500',
-  },
-  surahPlayBadge: {
-    backgroundColor: '#131e33',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 14,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#24375b',
-  },
-  surahPlayCount: {
-    color: '#38bdf8',
-    fontSize: 18,
-    fontWeight: '800',
-  },
-  surahPlayLabel: {
-    color: '#64748b',
-    fontSize: 10,
-    fontWeight: '600',
-  },
-  chartCard: {
-    backgroundColor: '#0d1526',
-    borderRadius: 20,
-    padding: 18,
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: '#1a2740',
-  },
-  chartHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 16,
-  },
-  chartTitle: {
-    color: '#8a95aa',
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 1.2,
-  },
-  chartSub: {
-    color: '#64748b',
-    fontSize: 11,
-    fontWeight: '500',
-  },
-  barsContainer: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    justifyContent: 'space-between',
-    height: 120,
-    paddingHorizontal: 4,
-  },
-  barColumn: {
-    alignItems: 'center',
-    flex: 1,
-  },
-  barValueText: {
-    color: '#64748b',
-    fontSize: 9,
-    fontWeight: '600',
-    marginBottom: 4,
-  },
-  barTrack: {
-    width: 14,
-    height: 80,
-    backgroundColor: '#121a2d',
-    borderRadius: 7,
-    justifyContent: 'flex-end',
-    overflow: 'hidden',
-  },
-  barFill: {
-    width: '100%',
-    backgroundColor: '#1e3860',
-    borderRadius: 7,
-  },
-  barFillActive: {
-    backgroundColor: '#38bdf8',
-    shadowColor: '#38bdf8',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.8,
-    shadowRadius: 6,
-  },
-  barDayText: {
-    color: '#64748b',
-    fontSize: 11,
-    fontWeight: '600',
-    marginTop: 8,
-  },
-  barDayTextActive: {
-    color: '#9bbfff',
-    fontWeight: '800',
-  },
-  spiritualCard: {
-    backgroundColor: '#0c1220',
-    borderRadius: 18,
-    padding: 18,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#19243a',
-    marginTop: 4,
-  },
-  spiritualArabic: {
-    color: '#9bbfff',
-    fontSize: 18,
-    fontWeight: '700',
-    textAlign: 'center',
-    marginBottom: 6,
-    letterSpacing: 1,
-  },
-  spiritualEnglish: {
-    color: '#cbd5e1',
-    fontSize: 13,
-    fontStyle: 'italic',
-    textAlign: 'center',
-    marginBottom: 4,
-  },
-  spiritualRef: {
-    color: '#64748b',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  // Heatmap styles
   heatmapCard: {
-    backgroundColor: '#0c1220',
-    borderRadius: 18,
-    padding: 16,
-    marginBottom: 16,
+    backgroundColor: '#101624',
+    borderRadius: 20,
+    padding: 18,
     borderWidth: 1,
-    borderColor: '#19263e',
+    borderColor: '#1e293b',
+    marginBottom: 16,
   },
   heatmapHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
+    alignItems: 'flex-start',
+    marginBottom: 12,
   },
   heatmapTitleCol: {
     flex: 1,
@@ -842,124 +750,144 @@ const styles = StyleSheet.create({
     color: '#9bbfff',
     fontSize: 12,
     fontWeight: '800',
-    letterSpacing: 0.6,
+    letterSpacing: 0.8,
   },
   heatmapSub: {
-    color: '#8e9fb5',
-    fontSize: 11,
-    marginTop: 2,
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '500',
+    marginTop: 3,
   },
-  coverageBadge: {
-    backgroundColor: 'rgba(155, 191, 255, 0.12)',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 8,
-    alignItems: 'flex-end',
+  modeToggleContainer: {
+    flexDirection: 'row',
+    backgroundColor: '#0b0f19',
+    borderRadius: 10,
+    padding: 2,
     borderWidth: 1,
-    borderColor: 'rgba(155, 191, 255, 0.25)',
+    borderColor: '#1e293b',
   },
-  coverageText: {
-    color: '#ffffff',
+  modeToggleBtn: {
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 8,
+  },
+  modeToggleBtnActive: {
+    backgroundColor: '#1e3a68',
+  },
+  modeToggleText: {
+    color: '#64748b',
     fontSize: 11,
     fontWeight: '700',
   },
-  coveragePercent: {
+  modeToggleTextActive: {
     color: '#9bbfff',
-    fontSize: 10,
+  },
+  coverageSummaryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  coverageSummaryLabel: {
+    color: '#cbd5e1',
+    fontSize: 12,
     fontWeight: '600',
   },
+  coverageSummaryPercent: {
+    color: '#38bdf8',
+    fontSize: 12,
+    fontWeight: '700',
+  },
   quranProgressBarTrack: {
-    height: 4,
-    backgroundColor: '#162238',
-    borderRadius: 2,
-    marginVertical: 10,
+    height: 6,
+    backgroundColor: '#161f33',
+    borderRadius: 3,
     overflow: 'hidden',
+    marginBottom: 14,
   },
   quranProgressBarFill: {
     height: '100%',
     backgroundColor: '#38bdf8',
-    borderRadius: 2,
+    borderRadius: 3,
   },
   heatmapScrollContainer: {
-    paddingVertical: 6,
+    paddingVertical: 4,
   },
   heatmapGrid: {
     flexDirection: 'row',
-    gap: 4,
+    gap: 5,
   },
   heatmapColumn: {
     flexDirection: 'column',
-    gap: 4,
+    gap: 5,
   },
   heatmapCell: {
-    width: 14,
-    height: 14,
-    borderRadius: 3,
-    borderWidth: 0.5,
-    borderColor: 'rgba(255, 255, 255, 0.05)',
+    width: 24,
+    height: 24,
+    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)',
   },
   heatmapCellSelected: {
+    borderWidth: 2,
     borderColor: '#ffffff',
-    borderWidth: 1.5,
-    transform: [{ scale: 1.2 }],
-    zIndex: 10,
-    shadowColor: '#9bbfff',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.9,
-    shadowRadius: 5,
+    transform: [{ scale: 1.08 }],
+  },
+  heatmapCellNumber: {
+    fontSize: 9,
+    fontWeight: '800',
   },
   legendRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: 10,
-    paddingTop: 8,
+    marginTop: 12,
+    paddingTop: 10,
     borderTopWidth: 1,
-    borderTopColor: '#162238',
+    borderTopColor: '#161f33',
   },
   legendLeftText: {
     color: '#64748b',
-    fontSize: 10,
-    fontStyle: 'italic',
+    fontSize: 11,
+    fontWeight: '500',
   },
   legendRight: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 3,
-  },
-  legendText: {
-    color: '#64748b',
-    fontSize: 10,
-    marginHorizontal: 3,
+    gap: 4,
   },
   legendCell: {
-    width: 10,
-    height: 10,
-    borderRadius: 2,
+    width: 11,
+    height: 11,
+    borderRadius: 3,
+  },
+  legendText: {
+    color: '#94a3b8',
+    fontSize: 10,
+    fontWeight: '700',
+    marginHorizontal: 2,
   },
   inspectionCard: {
-    backgroundColor: '#11192b',
-    borderRadius: 14,
-    padding: 12,
-    marginTop: 12,
+    marginTop: 14,
+    backgroundColor: '#151d30',
+    borderRadius: 16,
+    padding: 14,
     borderWidth: 1,
-    borderColor: '#223454',
+    borderColor: '#263554',
   },
   inspectionTop: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 8,
+    marginBottom: 12,
   },
   inspectionNumBadge: {
-    width: 32,
-    height: 32,
+    backgroundColor: '#1e293b',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
     borderRadius: 8,
-    backgroundColor: 'rgba(155, 191, 255, 0.15)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(155, 191, 255, 0.3)',
+    marginRight: 10,
   },
   inspectionNumText: {
     color: '#9bbfff',
@@ -968,66 +896,307 @@ const styles = StyleSheet.create({
   },
   inspectionTitles: {
     flex: 1,
-    marginLeft: 10,
-    marginRight: 8,
   },
   inspectionEnglishName: {
     color: '#ffffff',
     fontSize: 15,
-    fontWeight: '700',
+    fontWeight: '800',
   },
   inspectionMeta: {
-    color: '#8e9fb5',
+    color: '#94a3b8',
     fontSize: 11,
+    fontWeight: '500',
     marginTop: 1,
   },
   inspectionArabicName: {
     color: '#9bbfff',
-    fontSize: 16,
+    fontSize: 18,
     fontWeight: '700',
+    marginLeft: 8,
   },
   inspectionBottom: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingTop: 8,
+    paddingTop: 10,
     borderTopWidth: 1,
-    borderTopColor: 'rgba(255, 255, 255, 0.06)',
+    borderTopColor: '#1e293b',
   },
   inspectionStatsRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 8,
+    flex: 1,
+    flexWrap: 'wrap',
   },
-  inspectionPlaysText: {
-    color: '#cbd5e1',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  topPill: {
-    backgroundColor: 'rgba(251, 146, 60, 0.15)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 6,
-    marginLeft: 8,
+  timePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(56, 189, 248, 0.14)',
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 8,
     borderWidth: 1,
-    borderColor: 'rgba(251, 146, 60, 0.3)',
+    borderColor: 'rgba(56, 189, 248, 0.3)',
   },
-  topPillText: {
-    color: '#fb923c',
-    fontSize: 10,
+  timePillText: {
+    color: '#38bdf8',
+    fontSize: 12,
     fontWeight: '700',
+  },
+  sessionPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1e293b',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  sessionPillText: {
+    color: '#cbd5e1',
+    fontSize: 11,
+    fontWeight: '600',
   },
   inspectionPlayBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#9bbfff',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 10,
+    marginLeft: 8,
   },
   inspectionPlayBtnText: {
     color: '#080b11',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  topTimeSection: {
+    marginTop: 16,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: '#161f33',
+  },
+  topTimeSectionTitle: {
+    color: '#94a3b8',
     fontSize: 11,
     fontWeight: '800',
+    letterSpacing: 0.8,
+    marginBottom: 10,
+  },
+  topTimeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  topTimeRankBadge: {
+    width: 26,
+    height: 26,
+    borderRadius: 8,
+    backgroundColor: '#161f33',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+  },
+  topTimeRankText: {
+    color: '#9bbfff',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  topTimeInfo: {
+    flex: 1,
+  },
+  topTimeNameRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  topTimeSurahName: {
+    color: '#f1f5f9',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  topTimeDurationText: {
+    color: '#38bdf8',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  topTimeBarTrack: {
+    height: 5,
+    backgroundColor: '#161f33',
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  topTimeBarFill: {
+    height: '100%',
+    borderRadius: 3,
+  },
+  highlightCard: {
+    backgroundColor: '#101624',
+    borderRadius: 20,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    marginBottom: 16,
+  },
+  highlightHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  highlightBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(155, 191, 255, 0.12)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  highlightBadgeText: {
+    color: '#9bbfff',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+  },
+  highlightCountBadge: {
+    color: '#e5b869',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  highlightAyahTitle: {
+    color: '#ffffff',
+    fontSize: 17,
+    fontWeight: '800',
+    marginBottom: 10,
+  },
+  arabicSnippetBox: {
+    backgroundColor: '#0b0f19',
+    borderRadius: 14,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    marginBottom: 10,
+  },
+  arabicSnippetText: {
+    color: '#f8fafc',
+    fontSize: 20,
+    textAlign: 'center',
+    lineHeight: 34,
+    fontWeight: '600',
+  },
+  highlightDescription: {
+    color: '#94a3b8',
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: 14,
+  },
+  playHighlightBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#9bbfff',
+    paddingVertical: 12,
+    borderRadius: 12,
+  },
+  playHighlightBtnText: {
+    color: '#080b11',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  chartCard: {
+    backgroundColor: '#101624',
+    borderRadius: 20,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    marginBottom: 16,
+  },
+  chartHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 18,
+  },
+  chartTitle: {
+    color: '#9bbfff',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+  },
+  chartSub: {
+    color: '#64748b',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  barsContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+    height: 120,
+    paddingTop: 16,
+  },
+  barColumn: {
+    alignItems: 'center',
+    flex: 1,
+  },
+  barValueText: {
+    color: '#94a3b8',
+    fontSize: 10,
+    fontWeight: '700',
+    marginBottom: 6,
+  },
+  barTrack: {
+    width: 14,
+    height: 80,
+    backgroundColor: '#161f33',
+    borderRadius: 7,
+    justifyContent: 'flex-end',
+    overflow: 'hidden',
+  },
+  barFill: {
+    width: '100%',
+    backgroundColor: '#2563eb',
+    borderRadius: 7,
+  },
+  barFillActive: {
+    backgroundColor: '#9bbfff',
+  },
+  barDayText: {
+    color: '#64748b',
+    fontSize: 11,
+    fontWeight: '700',
+    marginTop: 8,
+  },
+  barDayTextActive: {
+    color: '#ffffff',
+  },
+  spiritualCard: {
+    backgroundColor: '#0b0f19',
+    borderRadius: 18,
+    padding: 20,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#161f33',
+  },
+  spiritualArabic: {
+    color: '#9bbfff',
+    fontSize: 20,
+    fontWeight: '700',
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  spiritualEnglish: {
+    color: '#cbd5e1',
+    fontSize: 13,
+    fontStyle: 'italic',
+    textAlign: 'center',
+    marginBottom: 4,
+  },
+  spiritualRef: {
+    color: '#64748b',
+    fontSize: 11,
+    fontWeight: '600',
   },
 });
