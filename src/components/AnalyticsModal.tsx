@@ -95,6 +95,9 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
   const surahMinutesMap = analytics?.surahMinutes || DEFAULT_ANALYTICS.surahMinutes;
   const surahCountsMap = analytics?.surahCounts || DEFAULT_ANALYTICS.surahCounts;
 
+  const maxSurahMinutes = Math.max(1, ...Object.values(surahMinutesMap));
+  const maxSurahSessions = Math.max(1, ...Object.values(surahCountsMap));
+
   // 114 Surahs GitHub Heatmap coverage calculation
   const distinctSurahsPlayed = Object.keys(surahMinutesMap).filter(
     num => (surahMinutesMap[Number(num)] || 0) > 0 || (surahCountsMap[Number(num)] || 0) > 0
@@ -105,21 +108,14 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
   const selectedSurahMinutes = Math.round(surahMinutesMap[selectedSurah.number] || 0);
   const selectedSurahPlays = surahCountsMap[selectedSurah.number] || 0;
 
-  // Color coding by Listening Time (Minutes) vs Sessions
-  const getSurahColorByTime = (minutes: number): { bg: string; text: string } => {
-    if (minutes <= 0) return { bg: '#131929', text: '#475569' };
-    if (minutes < 10) return { bg: '#1e3a68', text: '#cbd5e1' }; // Level 1: 1-9m (Subtle deep blue)
-    if (minutes < 25) return { bg: '#2563eb', text: '#ffffff' }; // Level 2: 10-24m (Vibrant royal blue)
-    if (minutes < 45) return { bg: '#38bdf8', text: '#080b11' }; // Level 3: 25-44m (Bright cyan sky)
-    return { bg: '#9bbfff', text: '#080b11' };                   // Level 4: 45m+ (Glowing sapphire)
-  };
-
-  const getSurahColorBySessions = (count: number): { bg: string; text: string } => {
-    if (count <= 0) return { bg: '#131929', text: '#475569' };
-    if (count <= 2) return { bg: '#1e3a68', text: '#cbd5e1' };
-    if (count <= 5) return { bg: '#2563eb', text: '#ffffff' };
-    if (count <= 9) return { bg: '#38bdf8', text: '#080b11' };
-    return { bg: '#9bbfff', text: '#080b11' };
+  // Color coding by relative value (0m unplayed state preserved, >0 scaled into 4 relative quartiles of maxValue)
+  const getSurahColorRelative = (value: number, maxValue: number): { bg: string; text: string } => {
+    if (value <= 0) return { bg: '#131929', text: '#475569' }; // 0m / unplayed state preserved
+    const ratio = value / Math.max(1, maxValue);
+    if (ratio <= 0.25) return { bg: '#1e3a68', text: '#cbd5e1' }; // Quartile 1 (1% - 25% of max)
+    if (ratio <= 0.50) return { bg: '#2563eb', text: '#ffffff' }; // Quartile 2 (26% - 50% of max)
+    if (ratio <= 0.75) return { bg: '#38bdf8', text: '#080b11' }; // Quartile 3 (51% - 75% of max)
+    return { bg: '#9bbfff', text: '#080b11' };                    // Quartile 4 (76% - 100% of max)
   };
 
   return (
@@ -308,8 +304,8 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
                       const isSelected = surah.number === selectedSurahNumber;
                       const colors =
                         heatmapMode === 'time'
-                          ? getSurahColorByTime(mins)
-                          : getSurahColorBySessions(count);
+                          ? getSurahColorRelative(mins, maxSurahMinutes)
+                          : getSurahColorRelative(count, maxSurahSessions);
 
                       return (
                         <TouchableOpacity
@@ -338,9 +334,11 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
               </View>
             </ScrollView>
 
-            {/* GitHub-style Activity Legend (Color coded by time) */}
+            {/* GitHub-style Activity Legend (Relative scaling from 0 to Max) */}
             <View style={styles.legendRow}>
-              <Text style={styles.legendLeftText}>Tap any Surah square to inspect</Text>
+              <Text style={styles.legendLeftText}>
+                Relative scale ({heatmapMode === 'time' ? `Max: ${formatTime(maxSurahMinutes)}` : `Max: ${maxSurahSessions}`})
+              </Text>
               <View style={styles.legendRight}>
                 <Text style={styles.legendText}>{heatmapMode === 'time' ? '0m' : '0'}</Text>
                 <View style={[styles.legendCell, { backgroundColor: '#131929' }]} />
@@ -348,9 +346,7 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
                 <View style={[styles.legendCell, { backgroundColor: '#2563eb' }]} />
                 <View style={[styles.legendCell, { backgroundColor: '#38bdf8' }]} />
                 <View style={[styles.legendCell, { backgroundColor: '#9bbfff' }]} />
-                <Text style={styles.legendText}>
-                  {heatmapMode === 'time' ? '45m+' : '10+'}
-                </Text>
+                <Text style={styles.legendText}>Max</Text>
               </View>
             </View>
 

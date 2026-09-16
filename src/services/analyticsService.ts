@@ -30,44 +30,44 @@ const getDayOfWeek = (): string => {
 
 // Initial realistic baseline for inspiring first-time view
 export const DEFAULT_ANALYTICS: UserAnalytics = {
-  totalSessions: 24,
-  totalMinutes: 186,
-  totalVersesLooped: 148,
-  currentStreakDays: 3,
+  totalSessions: 42,
+  totalMinutes: 512,
+  totalVersesLooped: 340,
+  currentStreakDays: 5,
   lastListenDate: getTodayString(),
   surahCounts: {
-    1: 6,   // Al-Fatihah
-    2: 8,   // Al-Baqarah
-    18: 4,  // Al-Kahf
-    36: 3,  // Ya-Sin
-    55: 9,  // Ar-Rahman
-    56: 5,  // Al-Waqi'ah
-    67: 14, // Al-Mulk (Top)
-    78: 3,  // An-Naba
+    1: 12,  // Al-Fatihah
+    2: 18,  // Al-Baqarah
+    18: 9,  // Al-Kahf
+    36: 7,  // Ya-Sin
+    55: 11, // Ar-Rahman
+    56: 6,  // Al-Waqi'ah
+    67: 16, // Al-Mulk
+    78: 5,  // An-Naba
     93: 6,  // Ad-Duha
     94: 5,  // Ash-Sharh
     97: 4,  // Al-Qadr
     108: 7, // Al-Kawthar
-    112: 12,// Al-Ikhlas
+    112: 14,// Al-Ikhlas
     113: 8, // Al-Falaq
     114: 9, // An-Nas
   },
   surahMinutes: {
-    1: 12,  // Al-Fatihah (12m)
-    2: 64,  // Al-Baqarah (1h 04m)
-    18: 38, // Al-Kahf (38m)
-    36: 24, // Ya-Sin (24m)
-    55: 32, // Ar-Rahman (32m)
-    56: 19, // Al-Waqi'ah (19m)
-    67: 52, // Al-Mulk (52m)
-    78: 14, // An-Naba (14m)
-    93: 9,  // Ad-Duha (9m)
-    94: 7,  // Ash-Sharh (7m)
-    97: 6,  // Al-Qadr (6m)
-    108: 5, // Al-Kawthar (5m)
-    112: 18,// Al-Ikhlas (18m)
-    113: 11,// Al-Falaq (11m)
-    114: 13,// An-Nas (13m)
+    1: 24,   // Al-Fatihah (24m)
+    2: 142,  // Al-Baqarah (2h 22m — 100+ mins!)
+    18: 84,  // Al-Kahf (1h 24m)
+    36: 56,  // Ya-Sin (56m)
+    55: 68,  // Ar-Rahman (1h 08m)
+    56: 34,  // Al-Waqi'ah (34m)
+    67: 115, // Al-Mulk (1h 55m — 100+ mins!)
+    78: 22,  // An-Naba (22m)
+    93: 14,  // Ad-Duha (14m)
+    94: 11,  // Ash-Sharh (11m)
+    97: 9,   // Al-Qadr (9m)
+    108: 8,  // Al-Kawthar (8m)
+    112: 38, // Al-Ikhlas (38m)
+    113: 16, // Al-Falaq (16m)
+    114: 19, // An-Nas (19m)
   },
   verseCounts: {
     '67:1': 32, // Al-Mulk verse 1
