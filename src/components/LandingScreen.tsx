@@ -36,7 +36,7 @@ export const LandingScreen: React.FC<LandingScreenProps> = ({
     surahName: 'Al-Fatihah',
     fromVerse: 1,
     toVerse: 7,
-    reciterId: 'raad_al_kurdi',
+    reciterId: 'raad',
     reciterName: 'Sheikh Raad Al-Kurdi',
     timestamp: Date.now(),
   };

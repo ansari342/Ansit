@@ -13,9 +13,11 @@ import { Reciter } from '../types';
 import { WordTiming } from '../data/reciterTimings';
 import {
   generateVersePitchProfile,
+  extractAndMapVersePitchAsync,
   samplePitchProfileAt,
   MicPitchTracker,
   LiveMicSample,
+  VersePitchProfile,
 } from '../services/pitchService';
 import { setAudioVolume } from '../services/audioService';
 
@@ -30,6 +32,9 @@ interface VocalPitchMonitorProps {
   reciter: Reciter;
   positionMillis: number;
   durationMillis: number;
+  ayahStartMs?: number;
+  ayahEndMs?: number;
+  totalTrackDurationMs?: number;
   isPlaying: boolean;
   echoPass: 1 | 2; // 1 = Listen to Reciter, 2 = Your Turn (Mic)
   mode: PitchPracticeMode;
@@ -41,6 +46,7 @@ interface Point2D {
   x: number;
   y: number;
   isOnPitch?: boolean;
+  isVoiced?: boolean;
 }
 
 /**
@@ -63,6 +69,9 @@ const ContinuousCurveLine = React.memo<{
         if (dashed && idx % 2 === 1) return null;
 
         const prev = points[idx - 1];
+        // Break line cleanly across unvoiced breath pauses
+        if (pt.isVoiced === false || prev.isVoiced === false) return null;
+
         const dx = pt.x - prev.x;
         const dy = pt.y - prev.y;
         // Skip large horizontal jumps (e.g., unvoiced silence gaps in mic trace)
@@ -110,6 +119,9 @@ export const VocalPitchMonitor: React.FC<VocalPitchMonitorProps> = ({
   reciter,
   positionMillis,
   durationMillis,
+  ayahStartMs = 0,
+  ayahEndMs = 0,
+  totalTrackDurationMs = 0,
   isPlaying,
   echoPass,
   mode,
@@ -120,6 +132,8 @@ export const VocalPitchMonitor: React.FC<VocalPitchMonitorProps> = ({
   const [keyMode, setKeyMode] = useState<PitchKeyMode>('relative');
   const [guideVolumeLevel, setGuideVolumeLevel] = useState<'20%' | 'Muted' | '50%'>('20%');
   const [micPermissionDenied, setMicPermissionDenied] = useState<boolean>(false);
+  const [liveMappedProfile, setLiveMappedProfile] = useState<VersePitchProfile | null>(null);
+  const [isMappingPitch, setIsMappingPitch] = useState<boolean>(false);
 
   // Recorded user pitch trace points for the current verse pass
   const [userTrace, setUserTrace] = useState<LiveMicSample[]>([]);
@@ -135,8 +149,8 @@ export const VocalPitchMonitor: React.FC<VocalPitchMonitorProps> = ({
   const isMicActiveTurn =
     mode === 'imitate' || (mode === 'echo' && echoPass === 2);
 
-  // 1. Generate Reciter Pitch Profile (Lanes, Quantized Target Note Blocks, 96-pt Ghost Contour)
-  const profile = useMemo(
+  // 1. Synchronous Reciter Pitch Profile (uses pre-extracted or cached recording contour immediately)
+  const syncProfile = useMemo(
     () =>
       generateVersePitchProfile(
         surahNumber,
@@ -147,6 +161,62 @@ export const VocalPitchMonitor: React.FC<VocalPitchMonitorProps> = ({
       ),
     [surahNumber, ayahNumber, words, wordTimings, reciter]
   );
+
+  // If verse is not in pre-extracted database yet, decode the audio recording on-demand and map its real pitch
+  useEffect(() => {
+    let isCancelled = false;
+    if (syncProfile.source === 'recording') {
+      setLiveMappedProfile(null);
+      setIsMappingPitch(false);
+      return;
+    }
+
+    setIsMappingPitch(true);
+    extractAndMapVersePitchAsync(
+      reciter,
+      surahNumber,
+      ayahNumber,
+      ayahStartMs,
+      ayahEndMs > ayahStartMs ? ayahEndMs : ayahStartMs + Math.max(3000, durationMillis),
+      totalTrackDurationMs,
+      words,
+      wordTimings
+    )
+      .then(mapped => {
+        if (!isCancelled) {
+          setLiveMappedProfile(mapped);
+          setIsMappingPitch(false);
+        }
+      })
+      .catch(() => {
+        if (!isCancelled) {
+          setIsMappingPitch(false);
+        }
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [
+    syncProfile.source,
+    reciter,
+    surahNumber,
+    ayahNumber,
+    ayahStartMs,
+    ayahEndMs,
+    totalTrackDurationMs,
+    durationMillis,
+    words,
+    wordTimings,
+  ]);
+
+  const profile =
+    liveMappedProfile &&
+    liveMappedProfile.surahNumber === surahNumber &&
+    liveMappedProfile.ayahNumber === ayahNumber &&
+    liveMappedProfile.reciterId === (reciter.id === 'multiple' ? 'raad' : reciter.id)
+      ? liveMappedProfile
+      : syncProfile;
 
   const profileRef = useRef(profile);
   profileRef.current = profile;
@@ -302,6 +372,7 @@ export const VocalPitchMonitor: React.FC<VocalPitchMonitorProps> = ({
     return profile.contourPoints.map(pt => ({
       x: pt.t * w,
       y: (pt.laneFloat + 0.5) * laneHeight,
+      isVoiced: pt.isVoiced,
     }));
   }, [profile.contourPoints, canvasSize.width, laneHeight]);
 
@@ -321,6 +392,7 @@ export const VocalPitchMonitor: React.FC<VocalPitchMonitorProps> = ({
         x: pt.t * w,
         y: (pt.laneFloat + 0.5) * laneHeight,
         isOnPitch: pt.isOnPitch,
+        isVoiced: pt.isVoiced,
       }));
     }
   }, [
@@ -458,7 +530,11 @@ export const VocalPitchMonitor: React.FC<VocalPitchMonitorProps> = ({
             <Text style={styles.noteBadgeText}>{activeNoteLabel}</Text>
           </View>
 
-          {micPermissionDenied && isMicActiveTurn ? (
+          {isMappingPitch ? (
+            <Text style={styles.statusIdleText}>
+              Mapping pitch from recording...
+            </Text>
+          ) : micPermissionDenied && isMicActiveTurn ? (
             <Text style={styles.warningText}>Enable Mic in Settings</Text>
           ) : isMicActiveTurn ? (
             latestMicSample?.isVoiced ? (
@@ -481,7 +557,7 @@ export const VocalPitchMonitor: React.FC<VocalPitchMonitorProps> = ({
             )
           ) : (
             <Text style={styles.statusIdleText}>
-              {reciter.shortName} Ghost Pitch
+              {reciter.shortName} Ghost Pitch{profile.source === 'recording' ? ' • Audio Mapped' : ''}
             </Text>
           )}
         </View>

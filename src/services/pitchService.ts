@@ -4,6 +4,9 @@ import { File } from 'expo-file-system';
 import * as LegacyFileSystem from 'expo-file-system/legacy';
 import { Reciter } from '../types';
 import { WordTiming } from '../data/reciterTimings';
+import { REAL_RECITER_PITCH } from '../data/realReciterPitch';
+import { getAudioUrl, BASE_RECITERS } from '../data/reciters';
+import { RAAD_SURAH_DURATIONS_MS } from '../data/raadDurations';
 import { setRecordingAudioMode } from './audioService';
 
 export interface NoteLane {
@@ -29,6 +32,7 @@ export interface PitchContourPoint {
   midiFloat: number;
   freqHz: number;
   wordIndex: number;
+  isVoiced: boolean;
 }
 
 export interface VersePitchProfile {
@@ -38,6 +42,7 @@ export interface VersePitchProfile {
   lanes: NoteLane[];
   targetBlocks: TargetNoteBlock[];
   contourPoints: PitchContourPoint[];
+  source: 'recording' | 'fallback';
 }
 
 export interface LiveMicSample {
@@ -197,11 +202,186 @@ function hashVerseReciter(surah: number, ayah: number, reciterId: string): numbe
   return Math.abs(h);
 }
 
+// In-memory cache of live-extracted 96-point MIDI contours from audio recordings
+const liveExtractedContourCache = new Map<string, number[]>();
+const inFlightPitchExtractions = new Map<string, Promise<number[] | null>>();
+const mp3HeaderMetaCache = new Map<string, { totalBytes: number; id3Bytes: number }>();
+
+/**
+ * Builds an accurate Melodyne-style VersePitchProfile directly from a 96-slice real acoustic
+ * MIDI contour (extracted from the reciter's MP3 recording via YIN fundamental frequency analysis).
+ */
+export function buildPitchProfileFromMidiContour(
+  surahNumber: number,
+  ayahNumber: number,
+  reciterId: string,
+  midiContour: number[],
+  wordCount: number = 4
+): VersePitchProfile {
+  const numSamples = midiContour.length || 96;
+  const voiced = midiContour.filter(m => m > 0).sort((a, b) => a - b);
+
+  // Center the 8 chromatic semitone lanes (1 semitone per lane) on the reciter's actual voiced register
+  let baseMidi = 50;
+  if (voiced.length > 0) {
+    const p05 = voiced[Math.floor(voiced.length * 0.05)];
+    const p95 = voiced[Math.floor(voiced.length * 0.95)];
+    const midCenter = Math.round((p05 + p95) / 2);
+    baseMidi = midCenter - 3;
+  }
+
+  // Lane 0 is highest note (baseMidi + 7), Lane 7 is lowest note (baseMidi)
+  const lanes: NoteLane[] = [];
+  for (let laneIdx = 0; laneIdx < 8; laneIdx++) {
+    const midi = baseMidi + (7 - laneIdx);
+    lanes.push({
+      laneIndex: laneIdx,
+      midi,
+      noteName: midiToNoteName(midi),
+      freqHz: midiToFreqHz(midi),
+    });
+  }
+
+  // 1. 5-point moving average of voiced frames to prevent vocal vibrato from splitting sustained notes
+  const smooth = midiContour.map((m, idx) => {
+    if (m <= 0) return 0;
+    let sum = 0;
+    let cnt = 0;
+    for (let k = -2; k <= 2; k++) {
+      const v = midiContour[idx + k];
+      if (v && v > 0) {
+        sum += v;
+        cnt++;
+      }
+    }
+    return cnt > 0 ? sum / cnt : m;
+  });
+
+  // 2. Segment into contiguous sustained note plateaus (within 0.68 semitones of plateau mean)
+  let rawRuns: { startSlice: number; endSlice: number; qMidi: number; laneIndex: number }[] = [];
+  let i = 0;
+  while (i < smooth.length) {
+    if (smooth[i] <= 0) {
+      i++;
+      continue;
+    }
+    let j = i;
+    let sum = smooth[i];
+    while (j + 1 < smooth.length && smooth[j + 1] > 0) {
+      const mean = sum / (j - i + 1);
+      if (Math.abs(smooth[j + 1] - mean) <= 0.68) {
+        j++;
+        sum += smooth[j];
+      } else {
+        break;
+      }
+    }
+    const sliceVals = midiContour
+      .slice(i, j + 1)
+      .filter(v => v > 0)
+      .sort((a, b) => a - b);
+    const medianMidi = sliceVals[Math.floor(sliceVals.length / 2)] || smooth[i];
+    const qMidi = Math.max(baseMidi, Math.min(baseMidi + 7, Math.round(medianMidi)));
+    rawRuns.push({
+      startSlice: i,
+      endSlice: j,
+      qMidi,
+      laneIndex: 7 - (qMidi - baseMidi),
+    });
+    i = j + 1;
+  }
+
+  // 3. Absorb brief 1-3 slice glissando transitions into adjacent sustained note plateaus
+  for (let pass = 0; pass < 2; pass++) {
+    for (let r = 0; r < rawRuns.length; r++) {
+      const run = rawRuns[r];
+      const len = run.endSlice - run.startSlice + 1;
+      if (len <= 3) {
+        const prev = r > 0 ? rawRuns[r - 1] : null;
+        const next = r + 1 < rawRuns.length ? rawRuns[r + 1] : null;
+        if (prev && prev.endSlice >= run.startSlice - 2) {
+          run.qMidi = prev.qMidi;
+          run.laneIndex = prev.laneIndex;
+        } else if (next && next.startSlice <= run.endSlice + 2) {
+          run.qMidi = next.qMidi;
+          run.laneIndex = next.laneIndex;
+        }
+      }
+    }
+    const merged: typeof rawRuns = [];
+    for (const run of rawRuns) {
+      const last = merged[merged.length - 1];
+      if (last && last.qMidi === run.qMidi && run.startSlice - last.endSlice <= 1) {
+        last.endSlice = run.endSlice;
+      } else {
+        merged.push({ ...run });
+      }
+    }
+    rawRuns = merged;
+  }
+
+  const validRuns = rawRuns.filter(r => r.endSlice - r.startSlice + 1 >= 3);
+  const targetBlocks: TargetNoteBlock[] = validRuns.map(run => {
+    const startRatio = Math.max(0.01, run.startSlice / Math.max(1, numSamples - 1));
+    const endRatio = Math.min(0.99, (run.endSlice + 0.75) / Math.max(1, numSamples - 1));
+    const lane = lanes[run.laneIndex] || lanes[4];
+    const approxWordIdx = Math.min(
+      Math.max(0, wordCount - 1),
+      Math.floor(((startRatio + endRatio) / 2) * wordCount)
+    );
+    return {
+      startRatio,
+      endRatio: Math.max(startRatio + 0.025, endRatio),
+      laneIndex: run.laneIndex,
+      midi: lane.midi,
+      noteName: lane.noteName,
+      freqHz: lane.freqHz,
+      wordIndex: approxWordIdx,
+    };
+  });
+
+  // 4. Build 96 continuous PitchContourPoints directly from the real MIDI contour
+  const contourPoints: PitchContourPoint[] = [];
+  let lastValidMidi = voiced.length > 0 ? voiced[0] : baseMidi + 3;
+
+  for (let idx = 0; idx < numSamples; idx++) {
+    const t = idx / Math.max(1, numSamples - 1);
+    const rawMidi = midiContour[idx];
+    const isVoiced = rawMidi > 0;
+    const midiFloat = isVoiced ? rawMidi : lastValidMidi;
+    if (isVoiced) {
+      lastValidMidi = rawMidi;
+    }
+
+    const rawLane = 7 - (midiFloat - baseMidi);
+    const laneFloat = Math.max(0.15, Math.min(7.65, rawLane));
+    const approxWordIdx = Math.min(Math.max(0, wordCount - 1), Math.floor(t * wordCount));
+
+    contourPoints.push({
+      t,
+      laneFloat,
+      midiFloat,
+      freqHz: midiToFreqHz(midiFloat),
+      wordIndex: approxWordIdx,
+      isVoiced,
+    });
+  }
+
+  return {
+    reciterId,
+    surahNumber,
+    ayahNumber,
+    lanes,
+    targetBlocks,
+    contourPoints,
+    source: 'recording',
+  };
+}
+
 /**
  * Generates the complete Vocal Pitch Monitor profile for a given verse and reciter:
- * - 8 semitone lanes (matching the reference screenshot)
- * - Quantized Target Note Blocks aligned with word timings
- * - Continuous 96-point Reciter Ghost Pitch Contour
+ * - Uses real acoustic f0 contours extracted directly from the reciter's MP3 recording whenever available
+ * - Falls back to phonetic contour only while an uncached verse recording is being decoded
  */
 export function generateVersePitchProfile(
   surahNumber: number,
@@ -210,8 +390,36 @@ export function generateVersePitchProfile(
   wordTimings: WordTiming[],
   reciter: Reciter
 ): VersePitchProfile {
-  const sig = getReciterSignature(reciter.id);
-  const seed = hashVerseReciter(surahNumber, ayahNumber, reciter.id);
+  const actualReciter = reciter.id === 'multiple' ? BASE_RECITERS[0] : reciter;
+  const cacheKey = `${actualReciter.id}_${surahNumber}_${ayahNumber}`;
+
+  // 1. Check live extracted recording cache first
+  const cachedContour = liveExtractedContourCache.get(cacheKey);
+  if (cachedContour && cachedContour.length > 0) {
+    return buildPitchProfileFromMidiContour(
+      surahNumber,
+      ayahNumber,
+      actualReciter.id,
+      cachedContour,
+      Math.max(1, words.length)
+    );
+  }
+
+  // 2. Check pre-extracted real recording database (src/data/realReciterPitch.ts)
+  const preExtracted = REAL_RECITER_PITCH[actualReciter.id]?.[surahNumber]?.[ayahNumber];
+  if (preExtracted && preExtracted.length > 0) {
+    return buildPitchProfileFromMidiContour(
+      surahNumber,
+      ayahNumber,
+      actualReciter.id,
+      preExtracted,
+      Math.max(1, words.length)
+    );
+  }
+
+  // 3. Fallback profile while live audio recording extraction is in flight
+  const sig = getReciterSignature(actualReciter.id);
+  const seed = hashVerseReciter(surahNumber, ayahNumber, actualReciter.id);
 
   // Build 8 lanes: lane 0 is highest pitch (top), lane 7 is lowest pitch (bottom)
   const lanes: NoteLane[] = [];
@@ -251,31 +459,24 @@ export function generateVersePitchProfile(
 
     let laneIndex = 4;
     if (sig.style === 'ascend_step') {
-      // Signature step-up progression like Raad Al-Kurdi (and the reference screenshot):
-      // Starts lower/warm (lane 6 -> 4 -> 3 -> 1), with gentle resolution on long verses
       if (wordCount <= 5) {
         const stepLanes = [6, 4, 3, 2, 1];
         laneIndex = stepLanes[Math.min(w, stepLanes.length - 1)];
       } else {
-        // Multi-clause phrase wave
         const phrasePos = (w % 5) / 4;
         laneIndex = Math.round(6 - phrasePos * 4.5);
         if (w === wordCount - 1) {
-          // Final word Madd sustain (either high climax or tonic cadence)
           laneIndex = (seed + ayahNumber) % 2 === 0 ? 1 : 4;
         }
       }
     } else if (sig.style === 'arch') {
-      // Melodic arch: rises to peak around 65% of verse, then resolves gracefully
       const arch = Math.sin(progress * Math.PI);
       laneIndex = Math.round(6 - arch * 4.5);
       if (features.hasMadd && laneIndex > 1) laneIndex -= 1;
     } else if (sig.style === 'measured') {
-      // Steady Tajweed steps (lanes 5, 4, 3, 2)
       const pattern = [5, 4, 3, 4, 2, 3, 5];
       laneIndex = pattern[(w + (seed % 3)) % pattern.length];
     } else {
-      // Expressive melodic contour
       const wave = Math.sin(progress * Math.PI * 1.4 + (seed % 4) * 0.3);
       laneIndex = Math.round(4.5 - wave * 3);
     }
@@ -301,7 +502,6 @@ export function generateVersePitchProfile(
   for (let i = 0; i < numSamples; i++) {
     const t = i / (numSamples - 1);
 
-    // Find current block
     let blockIdx = 0;
     for (let b = 0; b < targetBlocks.length; b++) {
       if (t >= targetBlocks[b].startRatio) {
@@ -313,7 +513,6 @@ export function generateVersePitchProfile(
 
     let laneFloat = block.laneIndex;
 
-    // 1. Initial vocal onset glide at the very start of the verse (like the bottom-left rise in screenshot)
     if (blockIdx === 0 && t < block.startRatio + 0.035) {
       const onsetProgress = Math.max(0, Math.min(1, t / Math.max(0.01, block.startRatio + 0.035)));
       const startLane = Math.min(7.3, block.laneIndex + 1.6);
@@ -322,20 +521,15 @@ export function generateVersePitchProfile(
       const blockDur = Math.max(0.02, block.endRatio - block.startRatio);
       const localT = Math.max(0, Math.min(1, (t - block.startRatio) / blockDur));
 
-      // 2. Smooth glissando transition from previous note block (first 14% of block)
       if (prevBlock && localT < 0.14) {
         const trans = localT / 0.14;
-        // Smoothstep interpolation
         const s = trans * trans * (3 - 2 * trans);
         laneFloat = prevBlock.laneIndex + (block.laneIndex - prevBlock.laneIndex) * s;
       } else if (prevBlock && localT >= 0.14 && localT < 0.26 && prevBlock.laneIndex > block.laneIndex) {
-        // 3. Natural consonant attack micro-inflection when stepping up to a new sustained note
-        // (matches the crisp spike at the start of each orange block in the user's screenshot!)
         const attackPhase = (localT - 0.14) / 0.12;
         const spike = Math.sin(attackPhase * Math.PI * 2) * sig.attackOvershoot * (1 - attackPhase * 0.5);
         laneFloat = block.laneIndex - spike;
       } else {
-        // 4. Sustained plateau with gentle Tajweed vibrato and micro-intonation
         const vib =
           Math.sin(localT * Math.PI * 2 * sig.vibratoRate) *
           sig.vibratoDepth *
@@ -346,7 +540,6 @@ export function generateVersePitchProfile(
 
     laneFloat = Math.max(0.3, Math.min(7.5, laneFloat));
 
-    // Convert laneFloat back to continuous MIDI & Hz
     const clampedIdx = Math.max(0, Math.min(7, Math.floor(laneFloat)));
     const nextIdx = Math.max(0, Math.min(7, Math.ceil(laneFloat)));
     const frac = laneFloat - clampedIdx;
@@ -359,17 +552,259 @@ export function generateVersePitchProfile(
       midiFloat,
       freqHz: midiToFreqHz(midiFloat),
       wordIndex: block.wordIndex,
+      isVoiced: true,
     });
   }
 
   return {
-    reciterId: reciter.id,
+    reciterId: actualReciter.id,
     surahNumber,
     ayahNumber,
     lanes,
     targetBlocks,
     contourPoints,
+    source: 'fallback',
   };
+}
+
+/**
+ * Extracts a 96-slice MIDI pitch contour from decoded Float32 audio samples using YIN f0 detection.
+ */
+function extractContourFromFloatChannel(
+  floatSamples: Float32Array,
+  sampleRate: number,
+  numSlices: number = 96
+): number[] {
+  const windowSize = Math.min(2048, Math.max(1024, Math.floor(sampleRate * 0.09)));
+  if (floatSamples.length < windowSize) return [];
+
+  const rawMidis: (number | null)[] = new Array(numSlices).fill(null);
+  for (let i = 0; i < numSlices; i++) {
+    const ratio = i / (numSlices - 1);
+    const startIdx = Math.floor(ratio * (floatSamples.length - windowSize));
+    const slice = floatSamples.subarray(startIdx, startIdx + windowSize);
+    const { freqHz, rms } = detectPitchHzFromFloatSamples(slice, sampleRate);
+    if (freqHz !== null && rms >= 0.01) {
+      rawMidis[i] = freqHzToMidi(freqHz);
+    }
+  }
+
+  const voiced = rawMidis.filter((m): m is number => m !== null).sort((a, b) => a - b);
+  if (voiced.length === 0) return [];
+  const medianMidi = voiced[Math.floor(voiced.length / 2)];
+
+  for (let i = 0; i < numSlices; i++) {
+    if (rawMidis[i] !== null) {
+      while (rawMidis[i]! - medianMidi > 7.5) rawMidis[i]! -= 12;
+      while (medianMidi - rawMidis[i]! > 7.5) rawMidis[i]! += 12;
+    }
+  }
+
+  // Bridge short consonant gaps (<= 5 slices)
+  const bridged = [...rawMidis];
+  let idx = 0;
+  while (idx < numSlices) {
+    if (bridged[idx] === null) {
+      let j = idx;
+      while (j < numSlices && bridged[j] === null) j++;
+      const gapLen = j - idx;
+      if (
+        gapLen <= 5 &&
+        idx > 0 &&
+        j < numSlices &&
+        bridged[idx - 1] !== null &&
+        bridged[j] !== null
+      ) {
+        for (let k = idx; k < j; k++) {
+          const frac = (k - idx + 1) / (gapLen + 1);
+          bridged[k] = bridged[idx - 1]! + (bridged[j]! - bridged[idx - 1]!) * frac;
+        }
+      }
+      idx = j;
+    } else {
+      idx++;
+    }
+  }
+
+  // 3-point median filter
+  const smoothed = new Array(numSlices).fill(0);
+  for (let s = 0; s < numSlices; s++) {
+    if (bridged[s] === null) {
+      smoothed[s] = 0;
+      continue;
+    }
+    const neighbors: number[] = [];
+    for (let d = -1; d <= 1; d++) {
+      if (s + d >= 0 && s + d < numSlices && bridged[s + d] !== null) {
+        neighbors.push(bridged[s + d]!);
+      }
+    }
+    neighbors.sort((a, b) => a - b);
+    smoothed[s] = Number(neighbors[Math.floor(neighbors.length / 2)].toFixed(2));
+  }
+
+  return smoothed;
+}
+
+/**
+ * Fetches and decodes the actual reciter audio recording for any verse not already in REAL_RECITER_PITCH,
+ * maps its 96-slice YIN fundamental frequency contour, and returns the resulting VersePitchProfile.
+ */
+export async function extractAndMapVersePitchAsync(
+  reciter: Reciter,
+  surahNumber: number,
+  ayahNumber: number,
+  ayahStartMs: number,
+  ayahEndMs: number,
+  totalTrackDurationMs: number,
+  words: string[],
+  wordTimings: WordTiming[]
+): Promise<VersePitchProfile> {
+  const actualReciter = reciter.id === 'multiple' ? BASE_RECITERS[0] : reciter;
+  const cacheKey = `${actualReciter.id}_${surahNumber}_${ayahNumber}`;
+  const wordCount = Math.max(1, words.length);
+
+  // 1. Check pre-extracted or cached recording contour
+  const preExtracted =
+    liveExtractedContourCache.get(cacheKey) ||
+    REAL_RECITER_PITCH[actualReciter.id]?.[surahNumber]?.[ayahNumber];
+  if (preExtracted && preExtracted.length > 0) {
+    return buildPitchProfileFromMidiContour(
+      surahNumber,
+      ayahNumber,
+      actualReciter.id,
+      preExtracted,
+      wordCount
+    );
+  }
+
+  // 2. Check if an extraction is already in-flight for this verse
+  let task = inFlightPitchExtractions.get(cacheKey);
+  if (!task) {
+    task = (async (): Promise<number[] | null> => {
+      try {
+        const AudioCtx =
+          typeof window !== 'undefined'
+            ? (window as any).AudioContext || (window as any).webkitAudioContext
+            : null;
+        if (!AudioCtx) return null;
+
+        let mp3Bytes: ArrayBuffer;
+        const surahStr = String(surahNumber).padStart(3, '0');
+        const ayahStr = String(ayahNumber).padStart(3, '0');
+
+        if (actualReciter.id !== 'raad' && actualReciter.subfolder) {
+          // Every reciter except Raad has a standalone verse MP3 on EveryAyah (~40-120 KB) with CORS enabled
+          const discreteVerseUrl = `https://everyayah.com/data/${actualReciter.subfolder}/${surahStr}${ayahStr}.mp3`;
+          const resp = await fetch(discreteVerseUrl);
+          if (!resp.ok) return null;
+          mp3Bytes = await resp.arrayBuffer();
+        } else {
+          // Full-surah CBR MP3 (Raad): fetch only the exact byte range of the current verse!
+          const url = `https://cdn.mp3quran.net/audio/raad-kurdi/r1/${surahStr}.mp3`;
+          let meta = mp3HeaderMetaCache.get(url);
+          if (!meta) {
+            const headResp = await fetch(url, { headers: { Range: 'bytes=0-15' } });
+            const contentRange = headResp.headers.get('content-range') || '';
+            const match = contentRange.match(/\/(\d+)/);
+            const totalBytes = match ? parseInt(match[1], 10) : 0;
+            const headerBuf = new Uint8Array(await headResp.arrayBuffer());
+            let id3Bytes = 0;
+            if (
+              headerBuf.length >= 10 &&
+              headerBuf[0] === 0x49 &&
+              headerBuf[1] === 0x44 &&
+              headerBuf[2] === 0x33
+            ) {
+              id3Bytes =
+                ((headerBuf[6] & 0x7f) << 21) |
+                ((headerBuf[7] & 0x7f) << 14) |
+                ((headerBuf[8] & 0x7f) << 7) |
+                (headerBuf[9] & 0x7f) + 10;
+            }
+            if (totalBytes > 0) {
+              meta = { totalBytes, id3Bytes };
+              mp3HeaderMetaCache.set(url, meta);
+            }
+          }
+
+          const trackDur =
+            actualReciter.id === 'raad'
+              ? RAAD_SURAH_DURATIONS_MS[surahNumber] || totalTrackDurationMs
+              : totalTrackDurationMs;
+
+          if (!meta || trackDur <= 1000) return null;
+
+          const audioBytes = Math.max(1, meta.totalBytes - meta.id3Bytes);
+          const startByte = Math.max(
+            meta.id3Bytes,
+            meta.id3Bytes + Math.floor((ayahStartMs / trackDur) * audioBytes)
+          );
+          const endByte = Math.min(
+            meta.totalBytes - 1,
+            meta.id3Bytes + Math.ceil((ayahEndMs / trackDur) * audioBytes)
+          );
+
+          const rangeResp = await fetch(url, {
+            headers: { Range: `bytes=${startByte}-${endByte}` },
+          });
+          if (!rangeResp.ok && rangeResp.status !== 206) return null;
+          const rawSlice = new Uint8Array(await rangeResp.arrayBuffer());
+
+          // Align to first MP3 frame sync header (0xFF followed by 0xE0+)
+          let syncOffset = 0;
+          for (let k = 0; k < Math.min(2048, rawSlice.length - 4); k++) {
+            if (rawSlice[k] === 0xff && (rawSlice[k + 1] & 0xe0) === 0xe0) {
+              syncOffset = k;
+              break;
+            }
+          }
+          mp3Bytes = rawSlice.buffer.slice(
+            rawSlice.byteOffset + syncOffset,
+            rawSlice.byteOffset + rawSlice.byteLength
+          );
+        }
+
+        const audioCtx = new AudioCtx();
+        try {
+          const audioBuffer = await audioCtx.decodeAudioData(mp3Bytes);
+          const channelData = audioBuffer.getChannelData(0);
+          const contour = extractContourFromFloatChannel(
+            channelData,
+            audioBuffer.sampleRate,
+            96
+          );
+          if (contour.length > 0) {
+            liveExtractedContourCache.set(cacheKey, contour);
+            return contour;
+          }
+        } finally {
+          try {
+            audioCtx.close();
+          } catch (e) {}
+        }
+        return null;
+      } catch (e) {
+        return null;
+      } finally {
+        inFlightPitchExtractions.delete(cacheKey);
+      }
+    })();
+    inFlightPitchExtractions.set(cacheKey, task);
+  }
+
+  const extracted = await task;
+  if (extracted && extracted.length > 0) {
+    return buildPitchProfileFromMidiContour(
+      surahNumber,
+      ayahNumber,
+      actualReciter.id,
+      extracted,
+      wordCount
+    );
+  }
+
+  return generateVersePitchProfile(surahNumber, ayahNumber, words, wordTimings, reciter);
 }
 
 /**
@@ -381,7 +816,15 @@ export function samplePitchProfileAt(
 ): PitchContourPoint & { noteName: string } {
   const pts = profile.contourPoints;
   if (pts.length === 0) {
-    return { t: 0, laneFloat: 4, midiFloat: 55, freqHz: 196, wordIndex: 0, noteName: 'G3' };
+    return {
+      t: 0,
+      laneFloat: 4,
+      midiFloat: 55,
+      freqHz: 196,
+      wordIndex: 0,
+      isVoiced: true,
+      noteName: 'G3',
+    };
   }
   const clamped = Math.max(0, Math.min(1, ratio));
   const exactIdx = clamped * (pts.length - 1);
@@ -401,41 +844,27 @@ export function samplePitchProfileAt(
     midiFloat,
     freqHz,
     wordIndex: p0.wordIndex,
+    isVoiced: p0.isVoiced,
     noteName: midiToNoteName(midiFloat),
   };
 }
 
-/**
- * Fast Normalized Autocorrelation / YIN-inspired fundamental frequency (f0) detector
- * operating on 16-bit signed little-endian PCM bytes from iOS AVAudioRecorder.
- */
-function detectPitchHzFromPCMBytes(bytes: Uint8Array, sampleRate: number = 16000): number | null {
-  const numSamples = Math.floor(bytes.byteLength / 2);
-  if (numSamples < 512) return null;
-
-  // Use the latest 1024 samples (~64ms window at 16kHz)
-  const windowSize = Math.min(1024, numSamples);
-  const startSample = numSamples - windowSize;
-  const floatSamples = new Float32Array(windowSize);
-
+function detectPitchHzFromFloatSamples(floatSamples: Float32Array, sampleRate: number): { freqHz: number | null; rms: number } {
+  const windowSize = floatSamples.length;
   let energySum = 0;
   for (let i = 0; i < windowSize; i++) {
-    const byteIdx = (startSample + i) * 2;
-    let val = bytes[byteIdx] | (bytes[byteIdx + 1] << 8);
-    if (val >= 0x8000) val -= 0x10000;
-    const norm = val / 32768.0;
-    floatSamples[i] = norm;
+    const norm = floatSamples[i];
     energySum += norm * norm;
   }
 
   const rms = Math.sqrt(energySum / windowSize);
   if (rms < 0.008) {
-    return null; // Silence / background noise floor
+    return { freqHz: null, rms };
   }
 
   // Search vocal fundamental frequency range: 75 Hz (D2) to 460 Hz (A#4)
-  const minLag = Math.floor(sampleRate / 460); // ~34 samples
-  const maxLag = Math.min(Math.floor(sampleRate / 75), Math.floor(windowSize / 2)); // ~213 samples
+  const minLag = Math.floor(sampleRate / 460);
+  const maxLag = Math.min(Math.floor(sampleRate / 75), Math.floor(windowSize / 2));
   const halfWin = Math.floor(windowSize / 2);
 
   // YIN Cumulative Mean Normalized Difference Function (CMNDF)
@@ -474,7 +903,7 @@ function detectPitchHzFromPCMBytes(bytes: Uint8Array, sampleRate: number = 16000
         bestTau = tau;
       }
     }
-    if (minVal > 0.48) return null; // Unvoiced consonant (s, sh, f, t, k)
+    if (minVal > 0.48) return { freqHz: null, rms };
   }
 
   // Parabolic interpolation for sub-sample frequency accuracy
@@ -490,8 +919,31 @@ function detectPitchHzFromPCMBytes(bytes: Uint8Array, sampleRate: number = 16000
   }
 
   const freqHz = sampleRate / refinedTau;
-  if (freqHz < 70 || freqHz > 500) return null;
-  return freqHz;
+  if (freqHz < 70 || freqHz > 500) return { freqHz: null, rms };
+  return { freqHz, rms };
+}
+
+/**
+ * Fast Normalized Autocorrelation / YIN-inspired fundamental frequency (f0) detector
+ * operating on 16-bit signed little-endian PCM bytes from iOS AVAudioRecorder.
+ */
+function detectPitchHzFromPCMBytes(bytes: Uint8Array, sampleRate: number = 16000): number | null {
+  const numSamples = Math.floor(bytes.byteLength / 2);
+  if (numSamples < 512) return null;
+
+  // Use the latest 1024 samples (~64ms window at 16kHz)
+  const windowSize = Math.min(1024, numSamples);
+  const startSample = numSamples - windowSize;
+  const floatSamples = new Float32Array(windowSize);
+
+  for (let i = 0; i < windowSize; i++) {
+    const byteIdx = (startSample + i) * 2;
+    let val = bytes[byteIdx] | (bytes[byteIdx + 1] << 8);
+    if (val >= 0x8000) val -= 0x10000;
+    floatSamples[i] = val / 32768.0;
+  }
+
+  return detectPitchHzFromFloatSamples(floatSamples, sampleRate).freqHz;
 }
 
 function decodeBase64ToBytes(b64: string): Uint8Array {
@@ -519,6 +971,7 @@ function decodeBase64ToBytes(b64: string): Uint8Array {
  */
 export class MicPitchTracker {
   private recording: Audio.Recording | null = null;
+  private webAudioCleanup: (() => void) | null = null;
   private isRunning: boolean = false;
   private smoothedLane: number | null = null;
   private smoothedMidi: number | null = null;
@@ -534,6 +987,55 @@ export class MicPitchTracker {
     }) => void
   ): Promise<boolean> {
     await this.stop();
+
+    // Web Audio API path for Expo Web browser preview
+    if (Platform.OS === 'web' && typeof window !== 'undefined' && typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: false,
+          },
+        });
+        const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
+        const audioCtx = new AudioCtx();
+        const source = audioCtx.createMediaStreamSource(stream);
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 2048;
+        source.connect(analyser);
+
+        const buf = new Float32Array(analyser.fftSize);
+        this.isRunning = true;
+
+        const intervalId = setInterval(() => {
+          if (!this.isRunning) return;
+          analyser.getFloatTimeDomainData(buf);
+          const { freqHz, rms } = detectPitchHzFromFloatSamples(buf, audioCtx.sampleRate || 44100);
+          const meteringDb = rms > 0.0001 ? 20 * Math.log10(rms) : -160;
+          const isVoiced = rms > 0.01 && freqHz !== null;
+          const detectedMidi = freqHz ? freqHzToMidi(freqHz) : null;
+          onSample({
+            meteringDb,
+            isVoiced,
+            detectedFreqHz: freqHz,
+            detectedMidi,
+          });
+        }, 50);
+
+        this.webAudioCleanup = () => {
+          clearInterval(intervalId);
+          try {
+            stream.getTracks().forEach(t => t.stop());
+            audioCtx.close();
+          } catch (e) {}
+        };
+        return true;
+      } catch (e) {
+        console.warn('Web mic access error:', e);
+        return false;
+      }
+    }
 
     try {
       const perm = await Audio.requestPermissionsAsync();
@@ -761,6 +1263,10 @@ export class MicPitchTracker {
   async stop(): Promise<void> {
     this.isRunning = false;
     this.smoothedLane = null;
+    if (this.webAudioCleanup) {
+      this.webAudioCleanup();
+      this.webAudioCleanup = null;
+    }
     const rec = this.recording;
     this.recording = null;
 

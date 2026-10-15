@@ -188,10 +188,11 @@ export async function loadAndPlayAyah(
   };
 
   // 1. Fast path: If already loaded with this exact key (same verse repeat or continuous surah),
-  //    update status & seek in a SINGLE native call!
+  //    update status & seek in a SINGLE native call before attaching the new status listener
+  //    so stale pre-seek positionMillis ticks are never emitted to the new verse!
   if (currentSound && currentSoundVerseKey === key) {
     try {
-      currentSound.setOnPlaybackStatusUpdate(createStatusHandler());
+      currentSound.setOnPlaybackStatusUpdate(null);
       await currentSound.setStatusAsync({
         positionMillis: Math.max(0, initialPositionMillis),
         shouldPlay: true,
@@ -200,6 +201,9 @@ export async function loadAndPlayAyah(
         shouldCorrectPitch: true,
         progressUpdateIntervalMillis: 50,
       });
+      if (currentRequestId === activePlaybackId) {
+        currentSound.setOnPlaybackStatusUpdate(createStatusHandler());
+      }
       return currentSound;
     } catch (e) {
       // Fall through if existing sound became invalid
@@ -220,7 +224,6 @@ export async function loadAndPlayAyah(
   const preloaded = preloadedSounds.get(key);
   if (preloaded) {
     preloadedSounds.delete(key);
-    preloaded.setOnPlaybackStatusUpdate(createStatusHandler());
     try {
       if (currentRequestId === activePlaybackId) {
         currentSound = preloaded;
@@ -233,6 +236,9 @@ export async function loadAndPlayAyah(
           shouldCorrectPitch: true,
           progressUpdateIntervalMillis: 50,
         });
+        if (currentRequestId === activePlaybackId) {
+          preloaded.setOnPlaybackStatusUpdate(createStatusHandler());
+        }
         return preloaded;
       } else {
         disposeSoundAsync(preloaded);

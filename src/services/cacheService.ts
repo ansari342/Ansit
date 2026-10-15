@@ -1,8 +1,9 @@
+import { Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import { Reciter } from '../types';
 import { getAudioUrl, BASE_RECITERS } from '../data/reciters';
 
-const AUDIO_DIR = `${FileSystem.cacheDirectory}quran_audio/`;
+const AUDIO_DIR = `${FileSystem.cacheDirectory || ''}quran_audio/`;
 
 let isDirCreated = false;
 // In-memory lookup table for instant 0ms cache hits without blocking on disk I/O
@@ -48,7 +49,9 @@ export function cacheVerseInBackground(
   surah: number,
   ayah: number
 ): Promise<string | null> {
-  if (reciter.isSurahBased) return Promise.resolve(null);
+  if (Platform.OS === 'web' || !FileSystem.cacheDirectory || reciter.isSurahBased) {
+    return Promise.resolve(null);
+  }
 
   const key = getCacheKey(reciter, surah, ayah);
   const existingMem = memoryCacheMap.get(key);
@@ -106,7 +109,7 @@ export async function getOrDownloadVerseAudio(
   }
 
   const remoteUrl = getAudioUrl(reciter, surah, ayah);
-  if (reciter.isSurahBased) {
+  if (Platform.OS === 'web' || !FileSystem.cacheDirectory || reciter.isSurahBased) {
     return remoteUrl;
   }
 
