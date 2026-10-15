@@ -1516,7 +1516,7 @@ const styles = StyleSheet.create({
     fontFamily: 'UthmanicHafs',
     fontSize: 28,
     lineHeight: 56,
-    color: 'rgba(255, 255, 255, 0.75)',
+    color: '#ffffff',
     textAlign: 'center',
   },
   wordBaseCompact: {
@@ -1528,15 +1528,15 @@ const styles = StyleSheet.create({
     opacity: 1,
   },
   wordCurrent: {
-    color: '#fbbf24',
-    textShadowColor: 'rgba(251, 191, 36, 0.85)',
+    color: '#fb923c',
+    textShadowColor: 'rgba(249, 115, 22, 0.85)',
     textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 10,
+    textShadowRadius: 11,
     opacity: 1,
   },
   wordUpcoming: {
-    color: 'rgba(226, 232, 240, 0.35)',
-    opacity: 0.45,
+    color: '#ffffff',
+    opacity: 1,
     textShadowRadius: 0,
   },
   ayahEndSymbol: {
@@ -1548,8 +1548,8 @@ const styles = StyleSheet.create({
     fontSize: 18,
   },
   ayahEndSymbolActive: {
-    color: '#fbbf24',
-    textShadowColor: 'rgba(251, 191, 36, 0.75)',
+    color: '#fb923c',
+    textShadowColor: 'rgba(249, 115, 22, 0.75)',
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 8,
   },
