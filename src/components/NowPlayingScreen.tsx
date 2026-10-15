@@ -8,6 +8,7 @@ import {
   StatusBar,
   ScrollView,
   Animated,
+  Pressable,
 } from 'react-native';
 import { Ionicons, MaterialIcons, Feather } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
@@ -47,6 +48,21 @@ import {
   registerNowPlayingHandlers,
 } from '../services/carPlayService';
 import { recordListenSession } from '../services/analyticsService';
+import {
+  LadderConfig,
+  LadderStep,
+  buildLadderPlan,
+  reciteWindowMs,
+  saveLadderProgress,
+  describeStep,
+} from '../services/hifzLadderService';
+import { HifzLadderHud, LadderPhase } from './HifzLadderHud';
+
+export interface LadderSessionConfig {
+  config: LadderConfig;
+  resumeStepIndex?: number;
+  resumeRepsDone?: number;
+}
 
 interface PlaybackStateReport {
   isPlaying: boolean;
@@ -62,6 +78,8 @@ interface NowPlayingScreenProps {
   reciter: Reciter;
   sessionId?: number;
   initialLoopSettings?: LoopSettings;
+  ladder?: LadderSessionConfig | null;
+  onExitLadder?: () => void;
   onMinimize: () => void;
   onPlaybackStateChange?: (state: PlaybackStateReport) => void;
 }
@@ -86,6 +104,8 @@ interface QuranCardViewProps {
   currentWordIndex: number;
   words: string[];
   compact?: boolean;
+  /** Hifz Ladder recite step: conceal the verse so the user recalls from memory. */
+  hidden?: boolean;
 }
 
 const QuranCardView = React.memo<QuranCardViewProps>(({
@@ -99,12 +119,40 @@ const QuranCardView = React.memo<QuranCardViewProps>(({
   currentWordIndex,
   words,
   compact = false,
+  hidden = false,
 }) => {
   const cardScrollRef = useRef<ScrollView>(null);
 
   useEffect(() => {
     cardScrollRef.current?.scrollTo({ y: 0, animated: false });
   }, [currentVerseNum]);
+
+  if (hidden) {
+    return (
+      <View style={[styles.cardWrapper, compact && styles.cardWrapperCompact]}>
+        <Animated.View style={[styles.ambientAura, { opacity: auraGlow }]} />
+        <Animated.View
+          style={[
+            styles.quranCard,
+            styles.quranCardHidden,
+            { opacity: cardOpacity, transform: [{ scale: cardScale }, { translateX: cardSlideX }] },
+          ]}
+        >
+          <View style={styles.hiddenPlaceholderRows}>
+            {[0.9, 0.7, 0.8].map((w, i) => (
+              <View key={i} style={[styles.hiddenPlaceholderLine, { width: `${w * 100}%` }]} />
+            ))}
+          </View>
+          <View style={styles.hiddenCenter}>
+            <Ionicons name="eye-off-outline" size={22} color="#6b5424" />
+            <Text style={styles.hiddenTitle}>Recite from memory</Text>
+            <Text style={styles.hiddenHint}>Hold to peek • double-tap to hear it</Text>
+          </View>
+          <Text style={styles.hiddenAyahNum}>﴿{toArabicIndic(currentVerseNum)}﴾</Text>
+        </Animated.View>
+      </View>
+    );
+  }
 
   return (
     <View style={[styles.cardWrapper, compact && styles.cardWrapperCompact]}>
@@ -210,6 +258,8 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
   reciter,
   sessionId,
   initialLoopSettings,
+  ladder = null,
+  onExitLadder,
   onMinimize,
   onPlaybackStateChange,
 }) => {
@@ -350,13 +400,50 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
   ]);
 
   // Refs for tracking state inside status callbacks
+  // ---- Hifz Ladder state ----
+  const ladderActive = !!ladder;
+  const ladderPlan = useMemo<LadderStep[]>(
+    () => (ladder ? buildLadderPlan(fromVerse, toVerse, ladder.config) : []),
+    [ladder, fromVerse, toVerse]
+  );
+  const [ladderStepIndex, setLadderStepIndex] = useState<number>(ladder?.resumeStepIndex ?? 0);
+  const [ladderRepsDone, setLadderRepsDone] = useState<number>(ladder?.resumeRepsDone ?? 0);
+  const [ladderPhase, setLadderPhase] = useState<LadderPhase>('listen');
+  const [reciteRemainingSec, setReciteRemainingSec] = useState<number | null>(null);
+  const [isReciteTimerPaused, setIsReciteTimerPaused] = useState<boolean>(false);
+  const [isPeeking, setIsPeeking] = useState<boolean>(false);
+  const ladderRef = useRef({
+    stepIndex: ladder?.resumeStepIndex ?? 0,
+    repsDone: ladder?.resumeRepsDone ?? 0,
+    phase: 'listen' as LadderPhase,
+    reciteTimer: null as ReturnType<typeof setTimeout> | null,
+    reciteTick: null as ReturnType<typeof setInterval> | null,
+    reciteDeadline: 0,
+    reciteRemainingMs: 0,
+    timerPaused: false,
+  });
+  const currentLadderStep: LadderStep | null =
+    ladderActive && ladderPlan.length > 0 ? ladderPlan[Math.min(ladderStepIndex, ladderPlan.length - 1)] : null;
+
+  // While a ladder runs, the loop engine works on the current step's range with simple range looping
+  const effectiveFromVerse = currentLadderStep ? currentLadderStep.fromVerse : fromVerse;
+  const effectiveToVerse = currentLadderStep ? currentLadderStep.toVerse : toVerse;
+  const effectiveLoopSettings: LoopSettings = ladderActive
+    ? { ...loopSettings, mode: 'range', verseRepeatCount: 1 }
+    : loopSettings;
+
+  // Pitch monitor is never shown during a ladder
+  useEffect(() => {
+    if (ladderActive && showPitchMonitor) setShowPitchMonitor(false);
+  }, [ladderActive, showPitchMonitor]);
+
   const stateRef = useRef({
     currentVerseNum,
-    fromVerse,
-    toVerse,
+    fromVerse: effectiveFromVerse,
+    toVerse: effectiveToVerse,
     surah,
     reciter: currentEffectiveReciter,
-    loopSettings,
+    loopSettings: effectiveLoopSettings,
     versePlayCount,
     verses,
     verseTimings,
@@ -369,11 +456,11 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
 
   stateRef.current = {
     currentVerseNum,
-    fromVerse,
-    toVerse,
+    fromVerse: effectiveFromVerse,
+    toVerse: effectiveToVerse,
     surah,
     reciter: currentEffectiveReciter,
-    loopSettings,
+    loopSettings: effectiveLoopSettings,
     versePlayCount,
     verses,
     verseTimings,
@@ -778,14 +865,269 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
 
   // Auto-play when verses and timings are loaded for this session
   const lastSessionKeyRef = useRef<string>('');
+
+  // =====================================================================================
+  // Hifz Ladder engine: drives listen / recite steps on top of the range-loop engine
+  // =====================================================================================
+  const clearReciteTimers = useCallback(() => {
+    const L = ladderRef.current;
+    if (L.reciteTimer) clearTimeout(L.reciteTimer);
+    if (L.reciteTick) clearInterval(L.reciteTick);
+    L.reciteTimer = null;
+    L.reciteTick = null;
+  }, []);
+
+  const persistLadder = useCallback(
+    (completed: boolean = false) => {
+      if (!ladder) return;
+      const L = ladderRef.current;
+      saveLadderProgress({
+        surahNumber: surah.number,
+        fromVerse,
+        toVerse,
+        reciterId: reciter.id,
+        config: ladder.config,
+        stepIndex: L.stepIndex,
+        repsDone: L.repsDone,
+        completed,
+      });
+    },
+    [ladder, surah.number, fromVerse, toVerse, reciter.id]
+  );
+
+  const setLadderPhaseBoth = useCallback((phase: LadderPhase) => {
+    ladderRef.current.phase = phase;
+    setLadderPhase(phase);
+  }, []);
+
+  // Forward declarations wired below (functions reference each other)
+  const ladderFnsRef = useRef({
+    startStep: (_index: number, _repsDone?: number) => {},
+    advanceStep: () => {},
+    completeReciteRep: () => {},
+  });
+
+  const armReciteTimer = useCallback(
+    (durationMs: number) => {
+      clearReciteTimers();
+      const L = ladderRef.current;
+      L.reciteRemainingMs = durationMs;
+      L.reciteDeadline = Date.now() + durationMs;
+      L.timerPaused = false;
+      setIsReciteTimerPaused(false);
+      setReciteRemainingSec(Math.ceil(durationMs / 1000));
+      L.reciteTimer = setTimeout(() => ladderFnsRef.current.completeReciteRep(), durationMs);
+      L.reciteTick = setInterval(() => {
+        const rem = Math.max(0, ladderRef.current.reciteDeadline - Date.now());
+        setReciteRemainingSec(Math.ceil(rem / 1000));
+      }, 250);
+    },
+    [clearReciteTimers]
+  );
+
+  const beginReciteRep = useCallback(() => {
+    if (!ladder) return;
+    const step = ladderPlan[ladderRef.current.stepIndex];
+    if (!step) return;
+    if (ladder.config.reciteTiming === 'auto') {
+      armReciteTimer(reciteWindowMs(step, stateRef.current.verseTimings));
+    } else {
+      clearReciteTimers();
+      setReciteRemainingSec(null);
+    }
+  }, [ladder, ladderPlan, armReciteTimer, clearReciteTimers]);
+
+  const startStep = useCallback(
+    (index: number, repsDone: number = 0) => {
+      if (!ladder || ladderPlan.length === 0) return;
+      const L = ladderRef.current;
+      clearReciteTimers();
+      const clamped = Math.max(0, Math.min(ladderPlan.length - 1, index));
+      const step = ladderPlan[clamped];
+      L.stepIndex = clamped;
+      L.repsDone = Math.max(0, Math.min(step.reps - 1, repsDone));
+      setLadderStepIndex(clamped);
+      setLadderRepsDone(L.repsDone);
+      setIsPeeking(false);
+
+      // Point the loop engine at this step's range immediately (before React re-renders)
+      stateRef.current.fromVerse = step.fromVerse;
+      stateRef.current.toVerse = step.toVerse;
+      stateRef.current.loopSettings = { ...stateRef.current.loopSettings, mode: 'range', verseRepeatCount: 1 };
+      stateRef.current.isLoopingTransition = false;
+
+      if (step.kind === 'listen') {
+        setLadderPhaseBoth('listen');
+        setReciteRemainingSec(null);
+        playVerse(step.fromVerse, 1);
+      } else {
+        setLadderPhaseBoth('recite');
+        pauseAudio();
+        isPlayingRef.current = false;
+        setIsPlaying(false);
+        stateRef.current.currentVerseNum = step.fromVerse;
+        setCurrentVerseNum(step.fromVerse);
+        lastWordIndexRef.current = -1;
+        setCurrentWordIndex(-1);
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+        beginReciteRep();
+      }
+      persistLadder(false);
+    },
+    [ladder, ladderPlan, clearReciteTimers, setLadderPhaseBoth, playVerse, beginReciteRep, persistLadder]
+  );
+
+  const advanceStep = useCallback(() => {
+    if (!ladder) return;
+    const L = ladderRef.current;
+    if (L.stepIndex + 1 >= ladderPlan.length) {
+      clearReciteTimers();
+      setLadderPhaseBoth('complete');
+      pauseAudio();
+      isPlayingRef.current = false;
+      setIsPlaying(false);
+      setReciteRemainingSec(null);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      persistLadder(true);
+      return;
+    }
+    startStep(L.stepIndex + 1, 0);
+  }, [ladder, ladderPlan.length, clearReciteTimers, setLadderPhaseBoth, persistLadder, startStep]);
+
+  const completeReciteRep = useCallback(() => {
+    const L = ladderRef.current;
+    if (L.phase !== 'recite') return;
+    const step = ladderPlan[L.stepIndex];
+    if (!step) return;
+    L.repsDone += 1;
+    setLadderRepsDone(L.repsDone);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    if (L.repsDone >= step.reps) {
+      advanceStep();
+    } else {
+      persistLadder(false);
+      beginReciteRep();
+    }
+  }, [ladderPlan, advanceStep, persistLadder, beginReciteRep]);
+
+  ladderFnsRef.current = { startStep, advanceStep, completeReciteRep };
+
+  /**
+   * Called by the loop engine when a full pass over the active range has finished.
+   * Returns true when the ladder took over (started a new step / returned to reciting),
+   * false when the engine should simply loop back to the start of the range.
+   */
+  const ladderOnCycleComplete = (): boolean => {
+    if (!ladderActive) return false;
+    const L = ladderRef.current;
+    const step = ladderPlan[L.stepIndex];
+    if (!step) return false;
+
+    if (L.phase === 'preview') {
+      // "Hear it again" finished: back to reciting the same rep
+      stateRef.current.isLoopingTransition = false;
+      pauseAudio();
+      isPlayingRef.current = false;
+      setIsPlaying(false);
+      stateRef.current.currentVerseNum = step.fromVerse;
+      setCurrentVerseNum(step.fromVerse);
+      setLadderPhaseBoth('recite');
+      beginReciteRep();
+      return true;
+    }
+
+    if (L.phase !== 'listen') return false;
+    L.repsDone += 1;
+    setLadderRepsDone(L.repsDone);
+    if (L.repsDone < step.reps) {
+      persistLadder(false);
+      return false; // keep looping this range
+    }
+    stateRef.current.isLoopingTransition = false;
+    advanceStep();
+    return true;
+  };
+
+  const handleLadderHearAgain = useCallback(() => {
+    const L = ladderRef.current;
+    if (L.phase !== 'recite') return;
+    const step = ladderPlan[L.stepIndex];
+    if (!step) return;
+    clearReciteTimers();
+    setReciteRemainingSec(null);
+    setLadderPhaseBoth('preview');
+    playVerse(step.fromVerse, 1);
+  }, [ladderPlan, clearReciteTimers, setLadderPhaseBoth, playVerse]);
+
+  const handleLadderToggleTimer = useCallback(() => {
+    const L = ladderRef.current;
+    if (L.phase !== 'recite' || ladder?.config.reciteTiming !== 'auto') return;
+    if (L.timerPaused) {
+      armReciteTimer(Math.max(1000, L.reciteRemainingMs));
+    } else {
+      L.reciteRemainingMs = Math.max(0, L.reciteDeadline - Date.now());
+      clearReciteTimers();
+      L.timerPaused = true;
+      setIsReciteTimerPaused(true);
+    }
+  }, [ladder, armReciteTimer, clearReciteTimers]);
+
+  const handleLadderPrevStep = useCallback(() => {
+    const L = ladderRef.current;
+    if (L.phase === 'complete') {
+      startStep(ladderPlan.length - 1, 0);
+      return;
+    }
+    startStep(Math.max(0, L.stepIndex - 1), 0);
+  }, [startStep, ladderPlan.length]);
+
+  const handleLadderNextStep = useCallback(() => {
+    const L = ladderRef.current;
+    if (L.phase === 'complete') return;
+    if (L.stepIndex + 1 >= ladderPlan.length) {
+      advanceStep();
+    } else {
+      startStep(L.stepIndex + 1, 0);
+    }
+  }, [startStep, advanceStep, ladderPlan.length]);
+
+  const handleLadderRestart = useCallback(() => {
+    startStep(0, 0);
+  }, [startStep]);
+
+  const handleLadderExit = useCallback(() => {
+    clearReciteTimers();
+    persistLadder(ladderRef.current.phase === 'complete');
+    onExitLadder?.();
+  }, [clearReciteTimers, persistLadder, onExitLadder]);
+
+  // Double-tap on the hidden card = hear it again
+  const lastCardTapRef = useRef<number>(0);
+  const handleHiddenCardTap = useCallback(() => {
+    const now = Date.now();
+    if (now - lastCardTapRef.current < 320) {
+      lastCardTapRef.current = 0;
+      handleLadderHearAgain();
+    } else {
+      lastCardTapRef.current = now;
+    }
+  }, [handleLadderHearAgain]);
+
+  useEffect(() => () => clearReciteTimers(), [clearReciteTimers]);
+
+  // Auto-play when verses and timings are loaded for this session
   useEffect(() => {
-    const sessionKey = `${surah.number}_${fromVerse}_${toVerse}_${reciter.id}_${sessionId || 0}`;
+    const sessionKey = `${surah.number}_${fromVerse}_${toVerse}_${reciter.id}_${sessionId || 0}_${ladder ? 'ladder' : 'play'}`;
     if (verses.length > 0 && lastSessionKeyRef.current !== sessionKey) {
       lastSessionKeyRef.current = sessionKey;
-      playVerse(fromVerse, 1);
+      if (ladder) {
+        startStep(ladder.resumeStepIndex ?? 0, ladder.resumeRepsDone ?? 0);
+      } else {
+        playVerse(fromVerse, 1);
+      }
       recordListenSession(surah, fromVerse, toVerse, currentEffectiveReciter).catch(() => {});
     }
-  }, [verses, fromVerse, toVerse, surah.number, reciter.id, sessionId, playVerse, currentEffectiveReciter]);
+  }, [verses, fromVerse, toVerse, surah.number, reciter.id, sessionId, playVerse, currentEffectiveReciter, ladder, startStep]);
 
   // Advance to next reciter when a loop cycle completes in Multiple Reciters mode
   const advanceToNextReciterAndLoop = async (targetAyah: number) => {
@@ -890,6 +1232,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       }
     } else if (settings.mode === 'range') {
       if (curr >= to) {
+        if (ladderOnCycleComplete()) return;
         if (isMultipleMode) {
           await advanceToNextReciterAndLoop(from);
         } else {
@@ -963,6 +1306,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       if (curr < to) {
         playVerse(curr + 1, 1);
       } else {
+        if (ladderOnCycleComplete()) return;
         if (isMultipleMode) {
           await advanceToNextReciterAndLoop(from);
         } else {
@@ -1028,6 +1372,14 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       positionMillis: currentVersePositionMillis,
       durationMillis: currentVerseDurationMillis,
       playbackRate: loopSettings.playbackSpeed,
+      titleOverride:
+        ladderActive && currentLadderStep
+          ? ladderPhase === 'complete'
+            ? `Ladder complete • Surah ${surah.englishName}`
+            : `Step ${ladderStepIndex + 1}/${ladderPlan.length} • ${
+                ladderPhase === 'recite' ? 'Your turn' : 'Listen'
+              } ${describeStep(currentLadderStep).replace(/^(Listen|Recite) /, '')}`
+          : null,
     });
   }, [
     isPlaying,
@@ -1039,6 +1391,11 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     currentVersePositionMillis,
     currentVerseDurationMillis,
     loopSettings.playbackSpeed,
+    ladderActive,
+    currentLadderStep,
+    ladderPhase,
+    ladderStepIndex,
+    ladderPlan.length,
   ]);
 
   useEffect(() => {
@@ -1151,11 +1508,25 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     handleSeekAyah,
   });
   nowPlayingHandlersRef.current = {
-    handleExternalPlay,
+    handleExternalPlay: () => {
+      if (ladderActive && ladderRef.current.phase === 'recite') {
+        handleLadderHearAgain();
+        return;
+      }
+      if (ladderActive && ladderRef.current.phase === 'complete') return;
+      handleExternalPlay();
+    },
     handleExternalPause,
-    handleTogglePlayPause,
-    handleNextVerse,
-    handlePreviousVerse,
+    handleTogglePlayPause: () => {
+      if (ladderActive && ladderRef.current.phase === 'recite') {
+        handleLadderHearAgain();
+        return;
+      }
+      if (ladderActive && ladderRef.current.phase === 'complete') return;
+      handleTogglePlayPause();
+    },
+    handleNextVerse: ladderActive ? handleLadderNextStep : handleNextVerse,
+    handlePreviousVerse: ladderActive ? handleLadderPrevStep : handlePreviousVerse,
     handleSeekAyah,
   };
 
@@ -1201,6 +1572,12 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
           <Ionicons name="chevron-down" size={24} color="#ffffff" />
         </TouchableOpacity>
 
+        {ladderActive ? (
+          <View style={styles.ladderHeaderBadge}>
+            <Ionicons name="layers" size={13} color="#e5b869" />
+            <Text style={styles.ladderHeaderBadgeText}>Hifz Ladder</Text>
+          </View>
+        ) : (
         <View style={styles.headerModePill}>
           <TouchableOpacity
             style={[
@@ -1252,6 +1629,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
             </Text>
           </TouchableOpacity>
         </View>
+        )}
 
         <TouchableOpacity
           style={styles.navBtn}
@@ -1280,20 +1658,48 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         </View>
       </View>
 
+      {/* 2b. HIFZ LADDER HUD */}
+      {ladderActive && ladder && (
+        <HifzLadderHud
+          plan={ladderPlan}
+          stepIndex={ladderStepIndex}
+          repsDone={ladderRepsDone}
+          phase={ladderPhase}
+          reciteRemainingSec={reciteRemainingSec}
+          reciteTiming={ladder.config.reciteTiming}
+          isTimerPaused={isReciteTimerPaused}
+          onCompleteRep={completeReciteRep}
+          onHearAgain={handleLadderHearAgain}
+          onToggleTimer={handleLadderToggleTimer}
+          onRestartLadder={handleLadderRestart}
+          onExit={handleLadderExit}
+        />
+      )}
+
       {/* 3. MIDDLE SECTION: QURAN CARD (+ REAL-TIME VOCAL PITCH MONITOR IN SPLIT VIEW) */}
       <View style={styles.middleSplitContainer}>
-        <QuranCardView
-          currentVerse={currentVerse}
-          currentVerseNum={currentVerseNum}
-          showBismillahHeader={showBismillahHeader}
-          cardOpacity={cardOpacity}
-          cardScale={cardScale}
-          cardSlideX={cardSlideX}
-          auraGlow={auraGlow}
-          currentWordIndex={currentWordIndex}
-          words={words}
-          compact={showPitchMonitor}
-        />
+        <Pressable
+          style={{ flex: 1 }}
+          disabled={!(ladderActive && ladderPhase === 'recite')}
+          onPress={handleHiddenCardTap}
+          onLongPress={() => setIsPeeking(true)}
+          delayLongPress={260}
+          onPressOut={() => setIsPeeking(false)}
+        >
+          <QuranCardView
+            currentVerse={currentVerse}
+            currentVerseNum={currentVerseNum}
+            showBismillahHeader={showBismillahHeader}
+            cardOpacity={cardOpacity}
+            cardScale={cardScale}
+            cardSlideX={cardSlideX}
+            auraGlow={auraGlow}
+            currentWordIndex={currentWordIndex}
+            words={words}
+            compact={showPitchMonitor}
+            hidden={ladderActive && ladderPhase === 'recite' && !isPeeking}
+          />
+        </Pressable>
 
         {showPitchMonitor && (
           <View style={styles.pitchMonitorWrapper}>
@@ -1328,8 +1734,8 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       <View style={styles.bottomSection}>
         {/* Interactive Scrubber Bar */}
         <SegmentedPlaybackBar
-          fromVerse={fromVerse}
-          toVerse={toVerse}
+          fromVerse={effectiveFromVerse}
+          toVerse={effectiveToVerse}
           currentVerseNum={currentVerseNum}
           positionMillis={currentVersePositionMillis}
           durationMillis={currentVerseDurationMillis}
@@ -1340,10 +1746,12 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         {/* Simplified Verse Indicator: e.g. Verse 5/7 */}
         <View style={styles.verseIndicatorBanner}>
           <Text style={styles.verseIndicatorText}>
-            Verse {currentVerseNum}/{toVerse}
+            {ladderActive && currentLadderStep
+              ? `Verse ${currentVerseNum}/${toVerse} • ${describeStep(currentLadderStep)}`
+              : `Verse ${currentVerseNum}/${toVerse}`}
           </Text>
 
-          {loopSettings.verseRepeatCount > 1 && (
+          {!ladderActive && loopSettings.verseRepeatCount > 1 && (
             <View style={styles.repeatBadge}>
               <Text style={styles.repeatBadgeText}>
                 {versePlayCount}/{loopSettings.verseRepeatCount}
@@ -1364,33 +1772,57 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
           <BouncyTouchable
             style={styles.controlIconBtn}
             triggerOnPressIn={true}
-            onPress={handlePreviousVerse}
+            onPress={ladderActive ? handleLadderPrevStep : handlePreviousVerse}
           >
             <MaterialIcons name="skip-previous" size={30} color="#ffffff" />
           </BouncyTouchable>
 
-          {/* Bouncy Play/Pause Button */}
-          <BouncyTouchable
-            style={styles.playPauseBtn}
-            triggerOnPressIn={true}
-            onPress={handleTogglePlayPause}
-          >
-            <Ionicons
-              name={isPlaying ? 'pause' : 'play'}
-              size={32}
-              color="#0a101d"
-              style={!isPlaying ? { marginLeft: 3 } : undefined}
-            />
-          </BouncyTouchable>
+          {/* Bouncy Play/Pause Button (✓ while reciting, ↻ when the ladder is complete) */}
+          {ladderActive && ladderPhase === 'recite' ? (
+            <BouncyTouchable
+              style={[styles.playPauseBtn, styles.playPauseBtnGold]}
+              triggerOnPressIn={true}
+              onPress={completeReciteRep}
+            >
+              <Ionicons name="checkmark" size={34} color="#0a101d" />
+            </BouncyTouchable>
+          ) : ladderActive && ladderPhase === 'complete' ? (
+            <BouncyTouchable
+              style={[styles.playPauseBtn, styles.playPauseBtnMint]}
+              triggerOnPressIn={true}
+              onPress={handleLadderRestart}
+            >
+              <Ionicons name="refresh" size={30} color="#0a101d" />
+            </BouncyTouchable>
+          ) : (
+            <BouncyTouchable
+              style={styles.playPauseBtn}
+              triggerOnPressIn={true}
+              onPress={handleTogglePlayPause}
+            >
+              <Ionicons
+                name={isPlaying ? 'pause' : 'play'}
+                size={32}
+                color="#0a101d"
+                style={!isPlaying ? { marginLeft: 3 } : undefined}
+              />
+            </BouncyTouchable>
+          )}
 
           <BouncyTouchable
             style={styles.controlIconBtn}
             triggerOnPressIn={true}
-            onPress={handleNextVerse}
+            onPress={ladderActive ? handleLadderNextStep : handleNextVerse}
           >
             <MaterialIcons name="skip-next" size={30} color="#ffffff" />
           </BouncyTouchable>
 
+          {ladderActive ? (
+            <View style={[styles.controlIconBtn, styles.loopActiveBtn]}>
+              <Ionicons name="layers-outline" size={22} color="#e5b869" />
+              <View style={[styles.loopDot, { backgroundColor: '#e5b869' }]} />
+            </View>
+          ) : (
           <BouncyTouchable
             style={[
               styles.controlIconBtn,
@@ -1406,6 +1838,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
             />
             {loopSettings.mode !== 'off' && <View style={styles.loopDot} />}
           </BouncyTouchable>
+          )}
         </View>
       </View>
 
@@ -1478,6 +1911,70 @@ const styles = StyleSheet.create({
   headerModeTabTextGold: {
     color: '#e5b869',
     fontWeight: '700',
+  },
+  ladderHeaderBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#272010',
+    borderWidth: 1,
+    borderColor: '#6b5424',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 18,
+  },
+  ladderHeaderBadgeText: {
+    color: '#e5b869',
+    fontSize: 12.5,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  quranCardHidden: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 28,
+    borderColor: '#3a2f14',
+  },
+  hiddenPlaceholderRows: {
+    width: '80%',
+    gap: 14,
+    alignItems: 'flex-end',
+    opacity: 0.35,
+  },
+  hiddenPlaceholderLine: {
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: '#2a3550',
+  },
+  hiddenCenter: {
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 22,
+  },
+  hiddenTitle: {
+    color: '#e5b869',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  hiddenHint: {
+    color: '#7e8ca3',
+    fontSize: 11.5,
+    fontWeight: '600',
+  },
+  hiddenAyahNum: {
+    marginTop: 18,
+    color: '#52627a',
+    fontSize: 22,
+    fontFamily: 'UthmanicHafs',
+    writingDirection: 'rtl',
+  },
+  playPauseBtnGold: {
+    backgroundColor: '#e5b869',
+    shadowColor: '#e5b869',
+  },
+  playPauseBtnMint: {
+    backgroundColor: '#34d399',
+    shadowColor: '#34d399',
   },
   titleSection: {
     alignItems: 'center',

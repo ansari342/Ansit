@@ -25,6 +25,8 @@ export interface CarPlayState {
   positionMillis?: number;
   durationMillis?: number;
   playbackRate?: number;
+  /** Optional override for the Now Playing title (e.g. Hifz Ladder step label). */
+  titleOverride?: string | null;
 }
 
 export type NowPlayingMediaState = CarPlayState;
@@ -70,6 +72,7 @@ function buildMetadataKey(state: CarPlayState): string {
     state.reciter?.id ?? '',
     Math.round(state.durationMillis ?? 0),
     state.playbackRate ?? 1,
+    state.titleOverride ?? '',
   ].join('|');
 }
 
@@ -101,7 +104,7 @@ export function updateNowPlayingState(newState: Partial<CarPlayState>) {
     lastSyncedPositionMillis = state.positionMillis ?? 0;
     lastSyncedIsPlaying = state.isPlaying;
     updateNowPlaying({
-      title: `Ayah ${verseNum} • Surah ${state.currentSurah.englishName}`,
+      title: state.titleOverride || `Ayah ${verseNum} • Surah ${state.currentSurah.englishName}`,
       artist: state.reciter.name,
       album: `${state.currentSurah.name} • Verses ${from}–${to}`,
       positionSec,

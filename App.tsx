@@ -5,7 +5,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useFonts } from 'expo-font';
 import { HomeScreen } from './src/components/HomeScreen';
-import { NowPlayingScreen } from './src/components/NowPlayingScreen';
+import { NowPlayingScreen, LadderSessionConfig } from './src/components/NowPlayingScreen';
 import { LoopSettingsModal } from './src/components/LoopSettingsModal';
 import { Surah, Reciter, LoopSettings } from './src/types';
 import { SURAHS } from './src/data/surahs';
@@ -38,6 +38,7 @@ export default function App() {
     toVerse: number;
     reciter: Reciter;
     sessionId?: number;
+    ladder?: LadderSessionConfig | null;
   }>({
     surah: initialSurah,
     fromVerse: 1,
@@ -115,7 +116,8 @@ export default function App() {
     surah: Surah,
     fromVerse: number,
     toVerse: number,
-    reciter: Reciter
+    reciter: Reciter,
+    ladder?: LadderSessionConfig | null
   ) => {
     await stopAndUnloadAudio();
     const newSession = {
@@ -124,11 +126,16 @@ export default function App() {
       toVerse,
       reciter,
       sessionId: Date.now(),
+      ladder: ladder ?? null,
     };
     setSession(newSession);
     saveLastSession(surah.number, fromVerse, toVerse, reciter.id);
     setHasStartedPlaying(true);
     setCurrentScreen('nowPlaying');
+  }, []);
+
+  const handleExitLadder = useCallback(() => {
+    setSession(prev => ({ ...prev, ladder: null, sessionId: Date.now() }));
   }, []);
 
   const handleOpenSettings = useCallback(() => {
@@ -272,6 +279,8 @@ export default function App() {
             reciter={session.reciter}
             sessionId={session.sessionId}
             initialLoopSettings={loopSettings}
+            ladder={session.ladder ?? null}
+            onExitLadder={handleExitLadder}
             onMinimize={() => setCurrentScreen('home')}
             onPlaybackStateChange={handlePlaybackStateChange}
           />

@@ -19,6 +19,8 @@ import { ReciterPickerModal } from './ReciterPickerModal';
 import { InlineWheelPicker } from './InlineWheelPicker';
 import { BouncyTouchable } from './BouncyTouchable';
 import { AnalyticsModal } from './AnalyticsModal';
+import { HifzLadderSetupModal } from './HifzLadderSetupModal';
+import type { LadderSessionConfig } from './NowPlayingScreen';
 import { recordListenSession } from '../services/analyticsService';
 import {
   HistoryItem,
@@ -38,7 +40,8 @@ interface HomeScreenProps {
     surah: Surah,
     fromVerse: number,
     toVerse: number,
-    reciter: Reciter
+    reciter: Reciter,
+    ladder?: LadderSessionConfig | null
   ) => void;
   onOpenSettings: () => void;
   activeSession?: {
@@ -75,6 +78,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
   const [surahPickerVisible, setSurahPickerVisible] = useState(false);
   const [reciterPickerVisible, setReciterPickerVisible] = useState(false);
   const [analyticsModalVisible, setAnalyticsModalVisible] = useState(false);
+  const [ladderSetupVisible, setLadderSetupVisible] = useState(false);
   const [isParentScrollEnabled, setIsParentScrollEnabled] = useState(true);
 
   // Smart Per-Surah Verse Memory: remembers the custom verse range selected for each surah
@@ -271,7 +275,8 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
     surah: Surah,
     from: number,
     to: number,
-    reciter: Reciter
+    reciter: Reciter,
+    ladder?: LadderSessionConfig | null
   ) => {
     if (persistTimeoutRef.current) {
       clearTimeout(persistTimeoutRef.current);
@@ -298,7 +303,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
 
     recordListenSession(surah, from, to, reciter).catch(() => {});
 
-    onStartPlayback(surah, from, to, reciter);
+    onStartPlayback(surah, from, to, reciter, ladder ?? null);
   };
 
   const handlePlayRecentlyPlayed = (item: HistoryItem) => {
@@ -554,7 +559,39 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
           />
           <Text style={styles.playNowText}>PLAY NOW</Text>
         </BouncyTouchable>
+
+        {/* HIFZ LADDER: structured memorization session */}
+        <BouncyTouchable
+          style={styles.ladderBtn}
+          onPress={() => {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+            setLadderSetupVisible(true);
+          }}
+        >
+          <Ionicons name="layers" size={18} color="#e5b869" style={{ marginRight: 10 }} />
+          <View style={{ alignItems: 'flex-start' }}>
+            <Text style={styles.ladderBtnText}>HIFZ LADDER</Text>
+            <Text style={styles.ladderBtnSub}>Listen · recite · combine · climb</Text>
+          </View>
+        </BouncyTouchable>
       </ScrollView>
+
+      <HifzLadderSetupModal
+        visible={ladderSetupVisible}
+        surah={selectedSurah}
+        fromVerse={fromVerse}
+        toVerse={toVerse}
+        reciter={selectedReciter}
+        onClose={() => setLadderSetupVisible(false)}
+        onStart={(config, resume) => {
+          setLadderSetupVisible(false);
+          handlePlaySession(selectedSurah, fromVerse, toVerse, selectedReciter, {
+            config,
+            resumeStepIndex: resume?.stepIndex ?? 0,
+            resumeRepsDone: resume?.repsDone ?? 0,
+          });
+        }}
+      />
 
       {/* Surah Picker Modal */}
       <SurahPickerModal
@@ -905,5 +942,28 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '800',
     letterSpacing: 1.5,
+  },
+  ladderBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#1a160c',
+    borderWidth: 1.5,
+    borderColor: '#6b5424',
+    paddingVertical: 14,
+    borderRadius: 16,
+    marginTop: 12,
+  },
+  ladderBtnText: {
+    color: '#e5b869',
+    fontSize: 14,
+    fontWeight: '800',
+    letterSpacing: 1.4,
+  },
+  ladderBtnSub: {
+    color: '#b8a77a',
+    fontSize: 11,
+    fontWeight: '600',
+    marginTop: 1,
   },
 });
