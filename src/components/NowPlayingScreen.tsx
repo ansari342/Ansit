@@ -295,6 +295,10 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
 
   const [currentWordIndex, setCurrentWordIndex] = useState<number>(-1);
   const lastWordIndexRef = useRef<number>(-1);
+  const lastManualSeekTimestampRef = useRef<number>(0);
+  const isPlayingRef = useRef<boolean>(false);
+  const lastReportedPosRef = useRef<number>(0);
+  const lastReportedDurRef = useRef<number>(1);
 
   const currentVerse = useMemo(
     () => verses.find(v => v.numberInSurah === currentVerseNum),
@@ -438,6 +442,24 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     return null;
   };
 
+  // Preload adjacent verses in background for 0ms Next/Prev skip
+  const preloadAdjacentVerses = useCallback(
+    (ayahNum: number, iteration: number, activeRec: Reciter) => {
+      if (activeRec.isSurahBased) return;
+      const upcoming = getUpcomingAyah(ayahNum, iteration);
+      if (upcoming !== null && upcoming !== ayahNum) {
+        preloadUpcomingVerse(surah.number, upcoming, activeRec, loopSettings.playbackSpeed);
+      }
+      if (ayahNum + 1 <= toVerse && ayahNum + 1 !== upcoming) {
+        preloadUpcomingVerse(surah.number, ayahNum + 1, activeRec, loopSettings.playbackSpeed);
+      }
+      if (ayahNum > fromVerse) {
+        preloadUpcomingVerse(surah.number, ayahNum - 1, activeRec, loopSettings.playbackSpeed);
+      }
+    },
+    [surah.number, fromVerse, toVerse, loopSettings.playbackSpeed, loopSettings.mode, loopSettings.verseRepeatCount]
+  );
+
   // 2. Playback logic
   const playVerse = useCallback(
     async (ayahNum: number, iteration: number = 1, reciterOverride?: Reciter) => {
@@ -446,12 +468,19 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         (isMultipleMode ? BASE_RECITERS[multipleReciterIndexRef.current] : reciter);
       const isTimed = !!activeRec.isSurahBased;
 
+      stateRef.current.currentVerseNum = ayahNum;
+      lastManualSeekTimestampRef.current = Date.now();
+      lastReportedPosRef.current = 0;
+
       setCurrentVerseNum(ayahNum);
       setVersePlayCount(iteration);
       setCurrentVersePositionMillis(0);
       lastWordIndexRef.current = -1;
       setCurrentWordIndex(-1);
       animateVerseChange();
+
+      // Immediately start preloading adjacent verses in parallel!
+      preloadAdjacentVerses(ayahNum, iteration, activeRec);
 
       if (isTimed) {
         let timing = stateRef.current.verseTimings[ayahNum];
@@ -461,7 +490,9 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         }
         const startSeekMs = timing?.startMs || 0;
         if (timing) {
-          setCurrentVerseDurationMillis(Math.max(1, timing.endMs - timing.startMs));
+          const dur = Math.max(1, timing.endMs - timing.startMs);
+          lastReportedDurRef.current = dur;
+          setCurrentVerseDurationMillis(dur);
         }
 
         const sound = await loadAndPlayAyah(
@@ -470,9 +501,12 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
           activeRec,
           loopSettings.playbackSpeed,
           async status => {
-            setIsPlaying(status.isPlaying);
+            if (status.isPlaying !== isPlayingRef.current) {
+              isPlayingRef.current = status.isPlaying;
+              setIsPlaying(status.isPlaying);
+            }
 
-            if (status.durationMillis && status.durationMillis !== durationMillis) {
+            if (status.durationMillis && Math.abs(status.durationMillis - durationMillis) > 100) {
               setDurationMillis(status.durationMillis);
               updateTimingsWithDuration(status.durationMillis);
             }
@@ -488,14 +522,24 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
               verseTimings: timings,
             } = stateRef.current;
 
-            // Update scrubber position within current verse
+            // Update scrubber position within current verse (throttled to avoid 60ms full-tree re-renders)
             if (!isUserScrubbingRef.current) {
               const currentTiming = timings[curr];
               if (currentTiming) {
                 const ayahDur = Math.max(1, currentTiming.endMs - currentTiming.startMs);
                 const ayahPos = Math.max(0, Math.min(ayahDur, pos - currentTiming.startMs));
-                setCurrentVersePositionMillis(ayahPos);
-                setCurrentVerseDurationMillis(ayahDur);
+                if (
+                  Math.abs(ayahPos - lastReportedPosRef.current) >= 120 ||
+                  ayahPos === 0 ||
+                  ayahPos >= ayahDur - 100
+                ) {
+                  lastReportedPosRef.current = ayahPos;
+                  setCurrentVersePositionMillis(ayahPos);
+                }
+                if (Math.abs(ayahDur - lastReportedDurRef.current) > 50) {
+                  lastReportedDurRef.current = ayahDur;
+                  setCurrentVerseDurationMillis(ayahDur);
+                }
               }
             }
 
@@ -518,25 +562,25 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
               }
             }
 
-            // Contiguous boundary check: smoothly updates current verse as audio plays gaplessly
-            for (let a = from; a <= to; a++) {
-              const t = timings[a];
-              if (t && pos >= t.startMs && pos < t.endMs) {
-                if (curr !== a) {
-                  setCurrentVerseNum(a);
-                  lastWordIndexRef.current = -1;
-                  setCurrentWordIndex(-1);
-                  animateVerseChange();
-                  try {
-                    Haptics.selectionAsync();
-                  } catch (e) {}
+            // Contiguous boundary check: guard against snapping back during an in-flight manual seek
+            if (Date.now() - lastManualSeekTimestampRef.current > 450) {
+              for (let a = from; a <= to; a++) {
+                const t = timings[a];
+                if (t && pos >= t.startMs && pos < t.endMs) {
+                  if (curr !== a) {
+                    stateRef.current.currentVerseNum = a;
+                    setCurrentVerseNum(a);
+                    lastWordIndexRef.current = -1;
+                    setCurrentWordIndex(-1);
+                    animateVerseChange();
+                    Haptics.selectionAsync().catch(() => {});
+                  }
+                  break;
                 }
-                break;
               }
             }
 
             // Boundary checking for loops:
-            // When verseRepeatCount === 1 and mode === 'range', audio flows naturally without interruption!
             if (settings.verseRepeatCount > 1) {
               const currentTiming = timings[curr];
               if (currentTiming && pos >= currentTiming.endMs - 120) {
@@ -556,21 +600,20 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
               const rangeEndTiming = timings[to];
               if (rangeEndTiming && pos >= rangeEndTiming.endMs - 120) {
                 pauseAudio();
+                isPlayingRef.current = false;
                 setIsPlaying(false);
               }
             } else if (status.didJustFinish) {
+              isPlayingRef.current = false;
               setIsPlaying(false);
             }
-          }
+          },
+          startSeekMs
         );
 
         if (sound) {
+          isPlayingRef.current = true;
           setIsPlaying(true);
-          try {
-            if (startSeekMs > 0) {
-              await sound.setPositionAsync(startSeekMs);
-            }
-          } catch (e) {}
         }
       } else {
         const sound = await loadAndPlayAyah(
@@ -579,11 +622,24 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
           activeRec,
           loopSettings.playbackSpeed,
           status => {
-            setIsPlaying(status.isPlaying);
+            if (status.isPlaying !== isPlayingRef.current) {
+              isPlayingRef.current = status.isPlaying;
+              setIsPlaying(status.isPlaying);
+            }
 
             if (!isUserScrubbingRef.current) {
-              setCurrentVersePositionMillis(status.positionMillis || 0);
-              if (status.durationMillis && status.durationMillis > 0) {
+              const pos = status.positionMillis || 0;
+              const dur = status.durationMillis || 1;
+              if (
+                Math.abs(pos - lastReportedPosRef.current) >= 120 ||
+                pos === 0 ||
+                pos >= dur - 100
+              ) {
+                lastReportedPosRef.current = pos;
+                setCurrentVersePositionMillis(pos);
+              }
+              if (status.durationMillis && status.durationMillis > 0 && Math.abs(status.durationMillis - lastReportedDurRef.current) > 50) {
+                lastReportedDurRef.current = status.durationMillis;
                 setCurrentVerseDurationMillis(status.durationMillis);
               }
             }
@@ -611,20 +667,13 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
             if (status.didJustFinish) {
               handleDiscreteVerseFinished();
             }
-          }
+          },
+          0
         );
 
         if (sound) {
+          isPlayingRef.current = true;
           setIsPlaying(true);
-          const upcoming = getUpcomingAyah(ayahNum, iteration);
-          if (upcoming !== null) {
-            preloadUpcomingVerse(
-              surah.number,
-              upcoming,
-              activeRec,
-              loopSettings.playbackSpeed
-            );
-          }
         }
       }
     },
@@ -638,6 +687,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       durationMillis,
       updateTimingsWithDuration,
       animateVerseChange,
+      preloadAdjacentVerses,
       verses,
     ]
   );
@@ -824,19 +874,21 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     }
   };
 
-  const handleTogglePlayPause = useCallback(async () => {
-    if (isPlaying) {
-      await pauseAudio();
+  const handleTogglePlayPause = useCallback(() => {
+    if (isPlayingRef.current) {
+      isPlayingRef.current = false;
       setIsPlaying(false);
+      pauseAudio();
     } else {
-      const resumed = await resumeAudio();
-      if (!resumed) {
-        await playVerse(currentVerseNum, 1);
-      } else {
-        setIsPlaying(true);
-      }
+      isPlayingRef.current = true;
+      setIsPlaying(true);
+      resumeAudio().then(resumed => {
+        if (!resumed) {
+          playVerse(stateRef.current.currentVerseNum, 1);
+        }
+      });
     }
-  }, [isPlaying, currentVerseNum, playVerse]);
+  }, [playVerse]);
 
   // Sync state to parent mini-player and CarPlay
   useEffect(() => {
@@ -855,7 +907,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         currentReciterName: currentEffectiveReciter.shortName,
       });
     }
-  }, [isPlaying, currentVerseNum, surah, currentEffectiveReciter, onPlaybackStateChange]);
+  }, [isPlaying, currentVerseNum, surah, currentEffectiveReciter, onPlaybackStateChange, handleTogglePlayPause]);
 
   const handleSeekingChange = useCallback((isSeeking: boolean) => {
     isUserScrubbingRef.current = isSeeking;
@@ -864,6 +916,8 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
   const handleSeekAyah = useCallback(
     async (targetAyah: number, seekFraction: number = 0) => {
       isUserScrubbingRef.current = false;
+      lastManualSeekTimestampRef.current = Date.now();
+
       if (isTimedReciter && isAudioLoaded()) {
         const timing = stateRef.current.verseTimings[targetAyah];
         if (timing) {
@@ -872,13 +926,18 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
           const targetPosMs = timing.startMs + seekOffsetMs;
 
           if (targetAyah !== stateRef.current.currentVerseNum) {
+            stateRef.current.currentVerseNum = targetAyah;
             setCurrentVerseNum(targetAyah);
+            lastWordIndexRef.current = -1;
+            setCurrentWordIndex(-1);
             animateVerseChange();
           }
 
+          lastReportedPosRef.current = seekOffsetMs;
+          lastReportedDurRef.current = ayahDuration;
           setCurrentVersePositionMillis(seekOffsetMs);
           setCurrentVerseDurationMillis(ayahDuration);
-          await seekAudio(targetPosMs);
+          seekAudio(targetPosMs);
         }
       } else {
         if (targetAyah !== stateRef.current.currentVerseNum || !isAudioLoaded()) {
@@ -886,69 +945,79 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
           if (seekFraction > 0) {
             const dur = currentVerseDurationMillis > 1 ? currentVerseDurationMillis : 10000;
             const seekPosMs = Math.round(seekFraction * dur);
+            lastReportedPosRef.current = seekPosMs;
             setCurrentVersePositionMillis(seekPosMs);
-            await seekAudio(seekPosMs);
+            seekAudio(seekPosMs);
           }
         } else {
           const dur = currentVerseDurationMillis > 1 ? currentVerseDurationMillis : 10000;
           const seekPosMs = Math.round(seekFraction * dur);
+          lastReportedPosRef.current = seekPosMs;
           setCurrentVersePositionMillis(seekPosMs);
-          await seekAudio(seekPosMs);
+          seekAudio(seekPosMs);
         }
       }
     },
     [isTimedReciter, animateVerseChange, playVerse, currentVerseDurationMillis, currentEffectiveReciter]
   );
 
-  const handlePreviousVerse = async () => {
-    try {
-      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    } catch (e) {}
+  const handlePreviousVerse = useCallback(() => {
+    const curr = stateRef.current.currentVerseNum;
+    const prevAyah = Math.max(fromVerse, curr - 1);
+    lastManualSeekTimestampRef.current = Date.now();
 
-    const prevAyah = Math.max(fromVerse, currentVerseNum - 1);
     if (isTimedReciter && isAudioLoaded()) {
+      stateRef.current.currentVerseNum = prevAyah;
       lastWordIndexRef.current = -1;
+      lastReportedPosRef.current = 0;
       setCurrentWordIndex(-1);
+      setCurrentVersePositionMillis(0);
       setCurrentVerseNum(prevAyah);
       animateVerseChange();
       const timing = stateRef.current.verseTimings[prevAyah];
-      if (timing) await seekAudio(timing.startMs);
+      if (timing) {
+        const dur = Math.max(1, timing.endMs - timing.startMs);
+        lastReportedDurRef.current = dur;
+        setCurrentVerseDurationMillis(dur);
+        seekAudio(timing.startMs);
+      }
     } else {
-      lastWordIndexRef.current = -1;
-      setCurrentWordIndex(-1);
       playVerse(prevAyah, 1, currentEffectiveReciter);
     }
-  };
+  }, [fromVerse, isTimedReciter, animateVerseChange, playVerse, currentEffectiveReciter]);
 
-  const handleNextVerse = async () => {
-    try {
-      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    } catch (e) {}
+  const handleNextVerse = useCallback(() => {
+    const curr = stateRef.current.currentVerseNum;
+    const nextAyah = Math.min(toVerse, curr + 1);
+    lastManualSeekTimestampRef.current = Date.now();
 
-    const nextAyah = Math.min(toVerse, currentVerseNum + 1);
     if (isTimedReciter && isAudioLoaded()) {
+      stateRef.current.currentVerseNum = nextAyah;
       lastWordIndexRef.current = -1;
+      lastReportedPosRef.current = 0;
       setCurrentWordIndex(-1);
+      setCurrentVersePositionMillis(0);
       setCurrentVerseNum(nextAyah);
       animateVerseChange();
       const timing = stateRef.current.verseTimings[nextAyah];
-      if (timing) await seekAudio(timing.startMs);
+      if (timing) {
+        const dur = Math.max(1, timing.endMs - timing.startMs);
+        lastReportedDurRef.current = dur;
+        setCurrentVerseDurationMillis(dur);
+        seekAudio(timing.startMs);
+      }
     } else {
-      lastWordIndexRef.current = -1;
-      setCurrentWordIndex(-1);
       playVerse(nextAyah, 1, currentEffectiveReciter);
     }
-  };
+  }, [toVerse, isTimedReciter, animateVerseChange, playVerse, currentEffectiveReciter]);
 
-  const handleToggleLoopMode = async () => {
-    try {
-      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-    } catch (e) {}
-
+  const handleToggleLoopMode = useCallback(() => {
     const modes: LoopSettings['mode'][] = ['range', 'single', 'off'];
-    const nextIdx = (modes.indexOf(loopSettings.mode) + 1) % modes.length;
-    setLoopSettings(prev => ({ ...prev, mode: modes[nextIdx] }));
-  };
+    setLoopSettings(prev => {
+      const nextIdx = (modes.indexOf(prev.mode) + 1) % modes.length;
+      return { ...prev, mode: modes[nextIdx] };
+    });
+  }, []);
 
   const totalVersesInRange = Math.max(1, toVerse - fromVerse + 1);
 
@@ -1033,22 +1102,27 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
           )}
         </View>
 
-        {/* Minimalist Controls with Springy Bouncy Play Button */}
+        {/* Minimalist Controls with Instant Touch-Down Response */}
         <View style={styles.controlsRow}>
-          <TouchableOpacity
+          <BouncyTouchable
             style={styles.controlIconBtn}
             onPress={() => setSettingsModalVisible(true)}
           >
             <Feather name="sliders" size={20} color="#8a95aa" />
-          </TouchableOpacity>
+          </BouncyTouchable>
 
-          <TouchableOpacity style={styles.controlIconBtn} onPress={handlePreviousVerse}>
+          <BouncyTouchable
+            style={styles.controlIconBtn}
+            triggerOnPressIn={true}
+            onPress={handlePreviousVerse}
+          >
             <MaterialIcons name="skip-previous" size={30} color="#ffffff" />
-          </TouchableOpacity>
+          </BouncyTouchable>
 
           {/* Bouncy Play/Pause Button */}
           <BouncyTouchable
             style={styles.playPauseBtn}
+            triggerOnPressIn={true}
             onPress={handleTogglePlayPause}
           >
             <Ionicons
@@ -1059,15 +1133,20 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
             />
           </BouncyTouchable>
 
-          <TouchableOpacity style={styles.controlIconBtn} onPress={handleNextVerse}>
+          <BouncyTouchable
+            style={styles.controlIconBtn}
+            triggerOnPressIn={true}
+            onPress={handleNextVerse}
+          >
             <MaterialIcons name="skip-next" size={30} color="#ffffff" />
-          </TouchableOpacity>
+          </BouncyTouchable>
 
-          <TouchableOpacity
+          <BouncyTouchable
             style={[
               styles.controlIconBtn,
               loopSettings.mode !== 'off' && styles.loopActiveBtn,
             ]}
+            triggerOnPressIn={true}
             onPress={handleToggleLoopMode}
           >
             <Ionicons
@@ -1076,7 +1155,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
               color={loopSettings.mode !== 'off' ? '#9bbfff' : '#8a95aa'}
             />
             {loopSettings.mode !== 'off' && <View style={styles.loopDot} />}
-          </TouchableOpacity>
+          </BouncyTouchable>
         </View>
       </View>
 

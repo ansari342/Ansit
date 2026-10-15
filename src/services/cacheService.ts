@@ -5,6 +5,17 @@ import { getAudioUrl, BASE_RECITERS } from '../data/reciters';
 const AUDIO_DIR = `${FileSystem.cacheDirectory}quran_audio/`;
 
 let isDirCreated = false;
+// In-memory lookup table for instant 0ms cache hits without blocking on disk I/O
+const memoryCacheMap = new Map<string, string>();
+const inFlightDownloads = new Map<string, Promise<string | null>>();
+
+function getCacheKey(reciter: Reciter, surah: number, ayah: number): string {
+  const actualReciter = reciter.id === 'multiple' ? BASE_RECITERS[0] : reciter;
+  if (actualReciter.isSurahBased) {
+    return `${actualReciter.id}_${surah}`;
+  }
+  return `${actualReciter.id}_${surah}_${ayah}`;
+}
 
 async function ensureDirectoryExists(): Promise<void> {
   if (isDirCreated) return;
@@ -29,40 +40,89 @@ export function getLocalAudioUri(reciter: Reciter, surah: number, ayah: number):
   return `${AUDIO_DIR}${actualReciter.id}_${surahStr}${ayahStr}.mp3`;
 }
 
+/**
+ * Downloads a verse to disk in the background without blocking active playback.
+ */
+export function cacheVerseInBackground(
+  reciter: Reciter,
+  surah: number,
+  ayah: number
+): Promise<string | null> {
+  if (reciter.isSurahBased) return Promise.resolve(null);
+
+  const key = getCacheKey(reciter, surah, ayah);
+  const existingMem = memoryCacheMap.get(key);
+  if (existingMem) return Promise.resolve(existingMem);
+
+  const existingFlight = inFlightDownloads.get(key);
+  if (existingFlight) return existingFlight;
+
+  const task = (async () => {
+    try {
+      await ensureDirectoryExists();
+      const localUri = getLocalAudioUri(reciter, surah, ayah);
+      const fileInfo = await FileSystem.getInfoAsync(localUri);
+      if (fileInfo.exists && (fileInfo.size || 0) > 1000) {
+        memoryCacheMap.set(key, localUri);
+        return localUri;
+      }
+
+      const remoteUrl = getAudioUrl(reciter, surah, ayah);
+      const result = await FileSystem.downloadAsync(remoteUrl, localUri);
+      if (result.status === 200) {
+        memoryCacheMap.set(key, result.uri);
+        return result.uri;
+      }
+    } catch (e) {
+      // Ignore background cache errors; streaming fallback handles playback
+    } finally {
+      inFlightDownloads.delete(key);
+    }
+    return null;
+  })();
+
+  inFlightDownloads.set(key, task);
+  return task;
+}
+
+/**
+ * Returns the fastest playable URI immediately:
+ * 1. If in memoryCacheMap (0ms), returns local file URI immediately.
+ * 2. If on disk (fast stat), returns local file URI and caches in memoryCacheMap.
+ * 3. Otherwise returns remoteUrl immediately so AVPlayer starts streaming right away,
+ *    while kicking off a non-blocking background download for future loops.
+ */
 export async function getOrDownloadVerseAudio(
   reciter: Reciter,
   surah: number,
   ayah: number
 ): Promise<string> {
-  await ensureDirectoryExists();
-  const localUri = getLocalAudioUri(reciter, surah, ayah);
+  const key = getCacheKey(reciter, surah, ayah);
 
-  try {
-    const fileInfo = await FileSystem.getInfoAsync(localUri);
-    if (fileInfo.exists && (fileInfo.size || 0) > 1000) {
-      return localUri;
-    }
-  } catch (e) {
-    // proceed to download
+  // 1. Instant 0ms memory cache hit
+  const memHit = memoryCacheMap.get(key);
+  if (memHit) {
+    return memHit;
   }
 
   const remoteUrl = getAudioUrl(reciter, surah, ayah);
-
   if (reciter.isSurahBased) {
-    // For surah-based continuous audio, stream directly so AVPlayer has full bandwidth
-    // and doesn't compete with a concurrent download socket on cellular/CarPlay.
     return remoteUrl;
   }
 
+  // 2. Quick disk check; if already on disk from a previous session, use it
   try {
-    const result = await FileSystem.downloadAsync(remoteUrl, localUri);
-    if (result.status === 200) {
-      return result.uri;
+    const localUri = getLocalAudioUri(reciter, surah, ayah);
+    const fileInfo = await FileSystem.getInfoAsync(localUri);
+    if (fileInfo.exists && (fileInfo.size || 0) > 1000) {
+      memoryCacheMap.set(key, localUri);
+      return localUri;
     }
-  } catch (err) {
-    console.warn(`Failed to cache ${remoteUrl}, falling back to direct stream:`, err);
-  }
+  } catch (e) {}
 
+  // 3. Not on disk yet: trigger background caching for subsequent loops,
+  //    and return remoteUrl IMMEDIATELY so playback starts without waiting for full download!
+  cacheVerseInBackground(reciter, surah, ayah).catch(() => {});
   return remoteUrl;
 }
 
@@ -72,20 +132,23 @@ export async function prefetchVerseRange(
   fromVerse: number,
   toVerse: number
 ): Promise<void> {
-  await ensureDirectoryExists();
   if (reciter.isSurahBased) {
-    getOrDownloadVerseAudio(reciter, surah, 1).catch(() => {});
     return;
   }
 
-  // Pre-cache the first 8 upcoming verses in small concurrency batches of 2
-  // to avoid network socket exhaustion while ensuring instant playback.
-  const maxToCache = Math.min(toVerse, fromVerse + 7);
+  // Pre-cache upcoming verses in small concurrency batches
+  const maxToCache = Math.min(toVerse, fromVerse + 10);
   (async () => {
-    for (let ayah = fromVerse; ayah <= maxToCache; ayah += 2) {
-      const batch = [getOrDownloadVerseAudio(reciter, surah, ayah)];
+    await ensureDirectoryExists();
+    for (let ayah = fromVerse; ayah <= maxToCache; ayah += 3) {
+      const batch: Promise<string | null>[] = [
+        cacheVerseInBackground(reciter, surah, ayah),
+      ];
       if (ayah + 1 <= maxToCache) {
-        batch.push(getOrDownloadVerseAudio(reciter, surah, ayah + 1));
+        batch.push(cacheVerseInBackground(reciter, surah, ayah + 1));
+      }
+      if (ayah + 2 <= maxToCache) {
+        batch.push(cacheVerseInBackground(reciter, surah, ayah + 2));
       }
       try {
         await Promise.all(batch);
