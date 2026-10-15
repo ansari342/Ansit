@@ -67,7 +67,7 @@ public class AyaPitchDetectorModule: Module {
       try session.setCategory(
         .playAndRecord,
         mode: .default,
-        options: [.defaultToSpeaker, .allowBluetoothA2DP, .allowAirPlay, .duckOthers]
+        options: [.defaultToSpeaker, .allowBluetoothA2DP, .allowAirPlay]
       )
       try session.setActive(true, options: [])
       try session.overrideOutputAudioPort(.speaker)

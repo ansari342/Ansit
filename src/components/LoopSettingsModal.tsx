@@ -8,6 +8,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LoopSettings, LoopMode } from '../types';
+import { isNowPlayingAvailable } from '../../modules/aya-now-playing';
 
 interface LoopSettingsModalProps {
   visible: boolean;
@@ -170,6 +171,11 @@ export const LoopSettingsModal: React.FC<LoopSettingsModalProps> = ({
           <TouchableOpacity style={styles.doneBtn} onPress={onClose}>
             <Text style={styles.doneBtnText}>Save & Apply</Text>
           </TouchableOpacity>
+
+          <Text style={styles.diagText}>
+            Lock Screen / Dynamic Island / CarPlay controls:{' '}
+            {isNowPlayingAvailable ? 'native module active' : 'unavailable in this build'}
+          </Text>
         </View>
       </View>
     </Modal>
@@ -283,5 +289,11 @@ const styles = StyleSheet.create({
     color: '#0a101d',
     fontSize: 15,
     fontWeight: '700',
+  },
+  diagText: {
+    color: '#52627a',
+    fontSize: 10.5,
+    textAlign: 'center',
+    marginTop: 10,
   },
 });

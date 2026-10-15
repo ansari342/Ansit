@@ -29,9 +29,13 @@ export async function initAudioMode(
       allowsRecordingIOS: allowRecording,
       staysActiveInBackground: true,
       playsInSilentModeIOS: true,
-      interruptionModeIOS: InterruptionModeIOS.DuckOthers,
-      shouldDuckAndroid: true,
-      interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
+      // Non-mixable session: required for iOS to treat Aya as the "Now Playing" app
+      // (Lock Screen / Dynamic Island / CarPlay controls) and to keep audio alive
+      // between verses while the screen is locked. Mixable modes (DuckOthers /
+      // MixWithOthers) are explicitly ineligible.
+      interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+      shouldDuckAndroid: false,
+      interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
       playThroughEarpieceAndroid: false,
     });
     isAudioInitialized = true;

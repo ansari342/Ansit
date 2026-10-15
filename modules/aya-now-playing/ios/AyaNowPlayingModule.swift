@@ -180,9 +180,22 @@ public class AyaNowPlayingModule: Module {
 
   // MARK: - Now Playing Info
 
+  /// iOS only promotes an app to the system "Now Playing" app (Lock Screen, Dynamic Island, CarPlay)
+  /// when its audio session is active and NOT mixable. Enforce that whenever playback is reported.
+  private func ensureEligibleSession(isPlaying: Bool) {
+    guard isPlaying else { return }
+    let session = AVAudioSession.sharedInstance()
+    let mixable: AVAudioSession.CategoryOptions = [.mixWithOthers, .duckOthers, .interruptSpokenAudioAndMixWithOthers]
+    if session.category == .playback && !session.categoryOptions.intersection(mixable).isEmpty {
+      try? session.setCategory(.playback, mode: .default, options: [])
+    }
+    try? session.setActive(true, options: [])
+  }
+
   private func applyNowPlaying(_ record: NowPlayingRecord) {
     let artwork = makeArtwork()
     DispatchQueue.main.async {
+      self.ensureEligibleSession(isPlaying: record.isPlaying)
       var info: [String: Any] = [
         MPMediaItemPropertyTitle: record.title,
         MPMediaItemPropertyArtist: record.artist,
@@ -205,6 +218,7 @@ public class AyaNowPlayingModule: Module {
 
   private func applyPlayback(positionSec: Double, durationSec: Double, isPlaying: Bool, rate: Double) {
     DispatchQueue.main.async {
+      self.ensureEligibleSession(isPlaying: isPlaying)
       var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
       info[MPMediaItemPropertyPlaybackDuration] = max(0.1, durationSec)
       info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = max(0, min(positionSec, durationSec))
