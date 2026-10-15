@@ -1,0 +1,7 @@
+{
+  "name": "aya-now-playing",
+  "version": "1.0.0",
+  "description": "Native iOS Now Playing (Dynamic Island / Lock Screen / CarPlay) playhead, remote commands, and audio route change handling for Aya",
+  "main": "index.ts",
+  "private": true
+}

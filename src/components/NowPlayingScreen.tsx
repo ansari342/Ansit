@@ -41,7 +41,11 @@ import { SoundwaveVisualizer } from './SoundwaveVisualizer';
 import { BouncyTouchable } from './BouncyTouchable';
 import { SegmentedPlaybackBar } from './SegmentedPlaybackBar';
 import { VocalPitchMonitor, PitchPracticeMode } from './VocalPitchMonitor';
-import { updateCarPlayState } from '../services/carPlayService';
+import {
+  updateCarPlayState,
+  clearNowPlayingState,
+  registerNowPlayingHandlers,
+} from '../services/carPlayService';
 import { recordListenSession } from '../services/analyticsService';
 
 interface PlaybackStateReport {
@@ -994,15 +998,50 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     }
   }, [playVerse]);
 
-  // Sync state to parent mini-player and CarPlay
+  const handleExternalPause = useCallback(() => {
+    if (!isPlayingRef.current) return;
+    isPlayingRef.current = false;
+    setIsPlaying(false);
+    pauseAudio();
+  }, []);
+
+  const handleExternalPlay = useCallback(() => {
+    if (isPlayingRef.current) return;
+    isPlayingRef.current = true;
+    setIsPlaying(true);
+    resumeAudio().then(resumed => {
+      if (!resumed) {
+        playVerse(stateRef.current.currentVerseNum, 1);
+      }
+    });
+  }, [playVerse]);
+
+  // Sync metadata + playhead to Dynamic Island / Lock Screen / CarPlay Now Playing and parent mini-player
   useEffect(() => {
     updateCarPlayState({
       currentSurah: surah,
       currentVerseNum,
+      fromVerse,
+      toVerse,
       reciter: currentEffectiveReciter,
       isPlaying,
+      positionMillis: currentVersePositionMillis,
+      durationMillis: currentVerseDurationMillis,
+      playbackRate: loopSettings.playbackSpeed,
     });
+  }, [
+    isPlaying,
+    currentVerseNum,
+    fromVerse,
+    toVerse,
+    surah,
+    currentEffectiveReciter,
+    currentVersePositionMillis,
+    currentVerseDurationMillis,
+    loopSettings.playbackSpeed,
+  ]);
 
+  useEffect(() => {
     if (onPlaybackStateChange) {
       onPlaybackStateChange({
         isPlaying,
@@ -1011,7 +1050,14 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         currentReciterName: currentEffectiveReciter.shortName,
       });
     }
-  }, [isPlaying, currentVerseNum, surah, currentEffectiveReciter, onPlaybackStateChange, handleTogglePlayPause]);
+  }, [isPlaying, currentVerseNum, currentEffectiveReciter, onPlaybackStateChange, handleTogglePlayPause]);
+
+  // Clear system Now Playing card when leaving the player
+  useEffect(() => {
+    return () => {
+      clearNowPlayingState();
+    };
+  }, []);
 
   const handleSeekingChange = useCallback((isSeeking: boolean) => {
     isUserScrubbingRef.current = isSeeking;
@@ -1093,6 +1139,44 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       playVerse(nextAyah, 1, currentEffectiveReciter);
     }
   }, [toVerse, isTimedReciter, animateVerseChange, playVerse, currentEffectiveReciter, resetPlayheadForAyah]);
+
+  // Dynamic Island / Lock Screen / CarPlay / steering-wheel remote commands + audio route loss handling.
+  // Handlers are read through a ref so the native listeners are registered exactly once.
+  const nowPlayingHandlersRef = useRef({
+    handleExternalPlay,
+    handleExternalPause,
+    handleTogglePlayPause,
+    handleNextVerse,
+    handlePreviousVerse,
+    handleSeekAyah,
+  });
+  nowPlayingHandlersRef.current = {
+    handleExternalPlay,
+    handleExternalPause,
+    handleTogglePlayPause,
+    handleNextVerse,
+    handlePreviousVerse,
+    handleSeekAyah,
+  };
+
+  useEffect(() => {
+    const unsubscribe = registerNowPlayingHandlers({
+      onPlay: () => nowPlayingHandlersRef.current.handleExternalPlay(),
+      onPause: () => nowPlayingHandlersRef.current.handleExternalPause(),
+      onTogglePlayPause: () => nowPlayingHandlersRef.current.handleTogglePlayPause(),
+      onNext: () => nowPlayingHandlersRef.current.handleNextVerse(),
+      onPrevious: () => nowPlayingHandlersRef.current.handlePreviousVerse(),
+      onSeekToSeconds: positionSec => {
+        const dur = Math.max(1, lastReportedDurRef.current);
+        const fraction = Math.max(0, Math.min(0.995, (positionSec * 1000) / dur));
+        nowPlayingHandlersRef.current.handleSeekAyah(stateRef.current.currentVerseNum, fraction);
+      },
+      // Car muted / CarPlay or Bluetooth disconnected: pause instead of continuing on the iPhone speaker
+      onAudioRouteLost: () => nowPlayingHandlersRef.current.handleExternalPause(),
+      onInterruptionBegan: () => nowPlayingHandlersRef.current.handleExternalPause(),
+    });
+    return unsubscribe;
+  }, []);
 
   const handleToggleLoopMode = useCallback(() => {
     const modes: LoopSettings['mode'][] = ['range', 'single', 'off'];
