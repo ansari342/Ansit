@@ -14,13 +14,19 @@ const preloadingInProgress = new Set<string>();
 const MAX_PRELOADED_SOUNDS = 3;
 
 let isAudioInitialized = false;
+let isRecordingModeActive = false;
+let currentAudioVolume = 1.0;
 let activePlaybackId = 0;
 
-export async function initAudioMode(force: boolean = false): Promise<void> {
-  if (isAudioInitialized && !force) return;
+export async function initAudioMode(
+  force: boolean = false,
+  allowRecording: boolean = isRecordingModeActive
+): Promise<void> {
+  if (isAudioInitialized && !force && isRecordingModeActive === allowRecording) return;
   try {
+    isRecordingModeActive = allowRecording;
     await Audio.setAudioModeAsync({
-      allowsRecordingIOS: false,
+      allowsRecordingIOS: allowRecording,
       staysActiveInBackground: true,
       playsInSilentModeIOS: true,
       interruptionModeIOS: InterruptionModeIOS.DuckOthers,
@@ -32,6 +38,24 @@ export async function initAudioMode(force: boolean = false): Promise<void> {
   } catch (e) {
     console.warn('Failed to set audio mode:', e);
   }
+}
+
+export async function setRecordingAudioMode(enableRecording: boolean): Promise<void> {
+  await initAudioMode(true, enableRecording);
+}
+
+export async function setAudioVolume(volume: number): Promise<void> {
+  const clamped = Math.max(0, Math.min(1, volume));
+  currentAudioVolume = clamped;
+  if (currentSound) {
+    try {
+      await currentSound.setVolumeAsync(clamped);
+    } catch (e) {}
+  }
+}
+
+export function getAudioVolume(): number {
+  return currentAudioVolume;
 }
 
 export type PlaybackStatusCallback = (status: {
@@ -104,8 +128,9 @@ export async function preloadUpcomingVerse(
       {
         shouldPlay: false,
         rate: playbackSpeed,
+        volume: currentAudioVolume,
         shouldCorrectPitch: true,
-        progressUpdateIntervalMillis: 80,
+        progressUpdateIntervalMillis: 50,
       }
     );
     allActiveSounds.add(sound);
@@ -171,8 +196,9 @@ export async function loadAndPlayAyah(
         positionMillis: Math.max(0, initialPositionMillis),
         shouldPlay: true,
         rate: playbackSpeed,
+        volume: currentAudioVolume,
         shouldCorrectPitch: true,
-        progressUpdateIntervalMillis: 80,
+        progressUpdateIntervalMillis: 50,
       });
       return currentSound;
     } catch (e) {
@@ -203,8 +229,9 @@ export async function loadAndPlayAyah(
           positionMillis: Math.max(0, initialPositionMillis),
           shouldPlay: true,
           rate: playbackSpeed,
+          volume: currentAudioVolume,
           shouldCorrectPitch: true,
-          progressUpdateIntervalMillis: 80,
+          progressUpdateIntervalMillis: 50,
         });
         return preloaded;
       } else {
@@ -228,8 +255,9 @@ export async function loadAndPlayAyah(
         shouldPlay: true,
         positionMillis: Math.max(0, initialPositionMillis),
         rate: playbackSpeed,
+        volume: currentAudioVolume,
         shouldCorrectPitch: true,
-        progressUpdateIntervalMillis: 80,
+        progressUpdateIntervalMillis: 50,
       },
       createStatusHandler()
     );

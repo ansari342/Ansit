@@ -40,6 +40,7 @@ import {
 import { SoundwaveVisualizer } from './SoundwaveVisualizer';
 import { BouncyTouchable } from './BouncyTouchable';
 import { SegmentedPlaybackBar } from './SegmentedPlaybackBar';
+import { VocalPitchMonitor, PitchPracticeMode } from './VocalPitchMonitor';
 import { updateCarPlayState } from '../services/carPlayService';
 import { recordListenSession } from '../services/analyticsService';
 
@@ -80,6 +81,7 @@ interface QuranCardViewProps {
   auraGlow: Animated.Value;
   currentWordIndex: number;
   words: string[];
+  compact?: boolean;
 }
 
 const QuranCardView = React.memo<QuranCardViewProps>(({
@@ -92,6 +94,7 @@ const QuranCardView = React.memo<QuranCardViewProps>(({
   auraGlow,
   currentWordIndex,
   words,
+  compact = false,
 }) => {
   const cardScrollRef = useRef<ScrollView>(null);
 
@@ -100,7 +103,7 @@ const QuranCardView = React.memo<QuranCardViewProps>(({
   }, [currentVerseNum]);
 
   return (
-    <View style={styles.cardWrapper}>
+    <View style={[styles.cardWrapper, compact && styles.cardWrapperCompact]}>
       {/* Meditative Ambient Radial Aura */}
       <Animated.View
         style={[
@@ -122,11 +125,14 @@ const QuranCardView = React.memo<QuranCardViewProps>(({
       >
         <ScrollView
           ref={cardScrollRef}
-          contentContainerStyle={styles.cardScrollContent}
+          contentContainerStyle={[
+            styles.cardScrollContent,
+            compact && styles.cardScrollContentCompact,
+          ]}
           showsVerticalScrollIndicator={false}
         >
           {/* Gilded Bismillah Banner */}
-          {showBismillahHeader && (
+          {showBismillahHeader && !compact && (
             <View style={styles.bismillahBox}>
               <Text style={styles.bismillahText}>
                 بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ
@@ -136,7 +142,7 @@ const QuranCardView = React.memo<QuranCardViewProps>(({
           )}
 
           {/* Word-By-Word Glowing Highlighting */}
-          <Text style={styles.arabicText}>
+          <Text style={[styles.arabicText, compact && styles.arabicTextCompact]}>
             {words.length > 0 ? (
               <>
                 {words.map((word, index) => {
@@ -149,6 +155,7 @@ const QuranCardView = React.memo<QuranCardViewProps>(({
                       key={`${index}_${word}`}
                       style={[
                         styles.wordBase,
+                        compact && styles.wordBaseCompact,
                         isSpoken && styles.wordSpoken,
                         isCurrent && styles.wordCurrent,
                         isUpcoming && styles.wordUpcoming,
@@ -162,6 +169,7 @@ const QuranCardView = React.memo<QuranCardViewProps>(({
                 <Text
                   style={[
                     styles.ayahEndSymbol,
+                    compact && styles.ayahEndSymbolCompact,
                     currentWordIndex >= words.length && styles.ayahEndSymbolActive,
                   ]}
                 >
@@ -170,16 +178,19 @@ const QuranCardView = React.memo<QuranCardViewProps>(({
                 </Text>
               </>
             ) : (
-              <Text style={styles.wordBase}>
+              <Text style={[styles.wordBase, compact && styles.wordBaseCompact]}>
                 {currentVerse?.arabicText || 'Loading verse...'}
               </Text>
             )}
           </Text>
 
-          <View style={styles.cardDivider} />
+          <View style={[styles.cardDivider, compact && styles.cardDividerCompact]} />
 
           {/* English Translation */}
-          <Text style={styles.translationText}>
+          <Text
+            style={[styles.translationText, compact && styles.translationTextCompact]}
+            numberOfLines={compact ? 2 : undefined}
+          >
             "{currentVerse?.englishText || 'Loading translation...'}"
           </Text>
         </ScrollView>
@@ -293,6 +304,11 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
   const [versePlayCount, setVersePlayCount] = useState<number>(1);
   const [settingsModalVisible, setSettingsModalVisible] = useState<boolean>(false);
 
+  // Vocal Pitch Monitor state (Layout 1 Split View)
+  const [showPitchMonitor, setShowPitchMonitor] = useState<boolean>(false);
+  const [pitchMode, setPitchMode] = useState<PitchPracticeMode>('listen');
+  const [echoPass, setEchoPass] = useState<1 | 2>(1);
+
   const [currentWordIndex, setCurrentWordIndex] = useState<number>(-1);
   const lastWordIndexRef = useRef<number>(-1);
   const lastManualSeekTimestampRef = useRef<number>(0);
@@ -340,6 +356,9 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     verses,
     verseTimings,
     currentWordTimings,
+    showPitchMonitor,
+    pitchMode,
+    echoPass,
     isLoopingTransition: false,
   });
 
@@ -354,6 +373,9 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     verses,
     verseTimings,
     currentWordTimings,
+    showPitchMonitor,
+    pitchMode,
+    echoPass,
     isLoopingTransition: stateRef.current.isLoopingTransition,
   };
 
@@ -522,14 +544,15 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
               verseTimings: timings,
             } = stateRef.current;
 
-            // Update scrubber position within current verse (throttled to avoid 60ms full-tree re-renders)
+            // Update scrubber position within current verse (faster 45ms tick when Pitch Monitor is active)
             if (!isUserScrubbingRef.current) {
               const currentTiming = timings[curr];
               if (currentTiming) {
                 const ayahDur = Math.max(1, currentTiming.endMs - currentTiming.startMs);
                 const ayahPos = Math.max(0, Math.min(ayahDur, pos - currentTiming.startMs));
+                const minDelta = stateRef.current.showPitchMonitor ? 45 : 120;
                 if (
-                  Math.abs(ayahPos - lastReportedPosRef.current) >= 120 ||
+                  Math.abs(ayahPos - lastReportedPosRef.current) >= minDelta ||
                   ayahPos === 0 ||
                   ayahPos >= ayahDur - 100
                 ) {
@@ -580,15 +603,12 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
               }
             }
 
-            // Boundary checking for loops:
-            if (settings.verseRepeatCount > 1) {
+            // Boundary checking for loops (and Auto-Echo pass alternation):
+            const isEchoActive =
+              stateRef.current.showPitchMonitor && stateRef.current.pitchMode === 'echo';
+            if (isEchoActive || settings.verseRepeatCount > 1 || settings.mode === 'single') {
               const currentTiming = timings[curr];
               if (currentTiming && pos >= currentTiming.endMs - 120) {
-                handleTimedVerseFinished();
-              }
-            } else if (settings.mode === 'single') {
-              const singleTiming = timings[curr];
-              if (singleTiming && pos >= singleTiming.endMs - 120) {
                 handleTimedVerseFinished();
               }
             } else if (settings.mode === 'range') {
@@ -630,8 +650,9 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
             if (!isUserScrubbingRef.current) {
               const pos = status.positionMillis || 0;
               const dur = status.durationMillis || 1;
+              const minDelta = stateRef.current.showPitchMonitor ? 45 : 120;
               if (
-                Math.abs(pos - lastReportedPosRef.current) >= 120 ||
+                Math.abs(pos - lastReportedPosRef.current) >= minDelta ||
                 pos === 0 ||
                 pos >= dur - 100
               ) {
@@ -764,6 +785,24 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       );
     }
 
+    // Auto-Echo mode alternation: Pass 1 (Listen to Reciter) -> Pass 2 (Your Mic Turn on same verse)
+    if (stateRef.current.showPitchMonitor && stateRef.current.pitchMode === 'echo') {
+      if (stateRef.current.echoPass === 1) {
+        stateRef.current.echoPass = 2;
+        setEchoPass(2);
+        lastWordIndexRef.current = -1;
+        setCurrentWordIndex(-1);
+        const timing = timings[curr];
+        if (timing) await seekAudio(timing.startMs);
+        await resumeAudio();
+        stateRef.current.isLoopingTransition = false;
+        return;
+      } else {
+        stateRef.current.echoPass = 1;
+        setEchoPass(1);
+      }
+    }
+
     if (count < settings.verseRepeatCount) {
       setVersePlayCount(count + 1);
       lastWordIndexRef.current = -1;
@@ -835,6 +874,19 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       await new Promise(res =>
         setTimeout(res, settings.delayBetweenVersesSeconds * 1000)
       );
+    }
+
+    // Auto-Echo mode alternation for discrete reciters: Pass 1 -> Pass 2 on same verse
+    if (stateRef.current.showPitchMonitor && stateRef.current.pitchMode === 'echo') {
+      if (stateRef.current.echoPass === 1) {
+        stateRef.current.echoPass = 2;
+        setEchoPass(2);
+        playVerse(curr, count);
+        return;
+      } else {
+        stateRef.current.echoPass = 1;
+        setEchoPass(1);
+      }
     }
 
     if (count < settings.verseRepeatCount) {
@@ -1028,13 +1080,63 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#080b11" />
 
-      {/* 1. TOP HEADER (Without "NOW PLAYING") */}
+      {/* 1. TOP HEADER WITH VIEW SWITCHER (Recitation | Pitch Match) */}
       <View style={styles.header}>
         <TouchableOpacity style={styles.navBtn} onPress={onMinimize}>
           <Ionicons name="chevron-down" size={24} color="#ffffff" />
         </TouchableOpacity>
 
-        <View style={{ flex: 1 }} />
+        <View style={styles.headerModePill}>
+          <TouchableOpacity
+            style={[
+              styles.headerModeTab,
+              !showPitchMonitor && styles.headerModeTabActive,
+            ]}
+            onPress={() => {
+              Haptics.selectionAsync().catch(() => {});
+              setShowPitchMonitor(false);
+            }}
+          >
+            <Ionicons
+              name="book-outline"
+              size={13}
+              color={!showPitchMonitor ? '#9bbfff' : '#7e8ca3'}
+            />
+            <Text
+              style={[
+                styles.headerModeTabText,
+                !showPitchMonitor && styles.headerModeTabTextActive,
+              ]}
+            >
+              Verse
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[
+              styles.headerModeTab,
+              showPitchMonitor && styles.headerModeTabActive,
+            ]}
+            onPress={() => {
+              Haptics.selectionAsync().catch(() => {});
+              setShowPitchMonitor(true);
+            }}
+          >
+            <Ionicons
+              name="mic-outline"
+              size={14}
+              color={showPitchMonitor ? '#e5b869' : '#7e8ca3'}
+            />
+            <Text
+              style={[
+                styles.headerModeTabText,
+                showPitchMonitor && styles.headerModeTabTextGold,
+              ]}
+            >
+              Pitch Match
+            </Text>
+          </TouchableOpacity>
+        </View>
 
         <TouchableOpacity
           style={styles.navBtn}
@@ -1045,8 +1147,10 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       </View>
 
       {/* 2. SURAH TITLE & SUBTITLE WITH DANCING SOUNDWAVE */}
-      <View style={styles.titleSection}>
-        <Text style={styles.surahTitle}>Surah {surah.englishName}</Text>
+      <View style={[styles.titleSection, showPitchMonitor && styles.titleSectionCompact]}>
+        <Text style={[styles.surahTitle, showPitchMonitor && styles.surahTitleCompact]}>
+          Surah {surah.englishName}
+        </Text>
         <View style={styles.subtitleRow}>
           {isMultipleMode && (
             <View style={styles.multipleModeBadge}>
@@ -1061,18 +1165,46 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         </View>
       </View>
 
-      {/* 3. MIDDLE SECTION: QURAN CARD WITH AMBIENT GLOW & SPRING ANIMATION */}
-      <QuranCardView
-        currentVerse={currentVerse}
-        currentVerseNum={currentVerseNum}
-        showBismillahHeader={showBismillahHeader}
-        cardOpacity={cardOpacity}
-        cardScale={cardScale}
-        cardSlideX={cardSlideX}
-        auraGlow={auraGlow}
-        currentWordIndex={currentWordIndex}
-        words={words}
-      />
+      {/* 3. MIDDLE SECTION: QURAN CARD (+ REAL-TIME VOCAL PITCH MONITOR IN SPLIT VIEW) */}
+      <View style={styles.middleSplitContainer}>
+        <QuranCardView
+          currentVerse={currentVerse}
+          currentVerseNum={currentVerseNum}
+          showBismillahHeader={showBismillahHeader}
+          cardOpacity={cardOpacity}
+          cardScale={cardScale}
+          cardSlideX={cardSlideX}
+          auraGlow={auraGlow}
+          currentWordIndex={currentWordIndex}
+          words={words}
+          compact={showPitchMonitor}
+        />
+
+        {showPitchMonitor && (
+          <View style={styles.pitchMonitorWrapper}>
+            <VocalPitchMonitor
+              surahNumber={surah.number}
+              ayahNumber={currentVerseNum}
+              words={words}
+              wordTimings={currentWordTimings}
+              reciter={currentEffectiveReciter}
+              positionMillis={currentVersePositionMillis}
+              durationMillis={currentVerseDurationMillis}
+              isPlaying={isPlaying}
+              echoPass={echoPass}
+              mode={pitchMode}
+              onChangeMode={newMode => {
+                setPitchMode(newMode);
+                setEchoPass(1);
+                stateRef.current.echoPass = 1;
+              }}
+              onSeekFraction={fraction => {
+                handleSeekAyah(currentVerseNum, fraction);
+              }}
+            />
+          </View>
+        )}
+      </View>
 
       {/* 4. PERMANENTLY STATIC BOTTOM SECTION WITH SCRUBBER & CONTROLS */}
       <View style={styles.bottomSection}>
@@ -1194,11 +1326,50 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  headerModePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0e1422',
+    borderRadius: 18,
+    padding: 3,
+    borderWidth: 1,
+    borderColor: '#1e2a42',
+  },
+  headerModeTab: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 15,
+  },
+  headerModeTabActive: {
+    backgroundColor: '#18243a',
+    borderWidth: 1,
+    borderColor: '#2a3e63',
+  },
+  headerModeTabText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#7e8ca3',
+  },
+  headerModeTabTextActive: {
+    color: '#9bbfff',
+    fontWeight: '700',
+  },
+  headerModeTabTextGold: {
+    color: '#e5b869',
+    fontWeight: '700',
+  },
   titleSection: {
     alignItems: 'center',
     paddingHorizontal: 20,
     paddingTop: 8,
     paddingBottom: 10,
+  },
+  titleSectionCompact: {
+    paddingTop: 2,
+    paddingBottom: 4,
   },
   surahTitle: {
     fontSize: 24,
@@ -1206,6 +1377,10 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     letterSpacing: -0.5,
     marginBottom: 4,
+  },
+  surahTitleCompact: {
+    fontSize: 19,
+    marginBottom: 2,
   },
   subtitleRow: {
     flexDirection: 'row',
@@ -1233,12 +1408,24 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 0.3,
   },
+  middleSplitContainer: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+  pitchMonitorWrapper: {
+    paddingHorizontal: 20,
+    paddingBottom: 4,
+  },
   cardWrapper: {
     flex: 1,
     paddingHorizontal: 20,
     paddingVertical: 10,
     justifyContent: 'center',
     position: 'relative',
+  },
+  cardWrapperCompact: {
+    flex: 1,
+    paddingVertical: 4,
   },
   ambientAura: {
     position: 'absolute',
@@ -1272,6 +1459,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     flexGrow: 1,
+  },
+  cardScrollContentCompact: {
+    paddingVertical: 10,
+    paddingHorizontal: 14,
   },
   bismillahBox: {
     alignItems: 'center',
@@ -1316,12 +1507,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
     marginBottom: 16,
   },
+  arabicTextCompact: {
+    fontSize: 22,
+    lineHeight: 40,
+    marginBottom: 6,
+  },
   wordBase: {
     fontFamily: 'UthmanicHafs',
     fontSize: 28,
     lineHeight: 56,
     color: 'rgba(255, 255, 255, 0.75)',
     textAlign: 'center',
+  },
+  wordBaseCompact: {
+    fontSize: 22,
+    lineHeight: 40,
   },
   wordSpoken: {
     color: '#ffffff',
@@ -1344,6 +1544,9 @@ const styles = StyleSheet.create({
     color: '#9bbfff',
     fontSize: 22,
   },
+  ayahEndSymbolCompact: {
+    fontSize: 18,
+  },
   ayahEndSymbolActive: {
     color: '#fbbf24',
     textShadowColor: 'rgba(251, 191, 36, 0.75)',
@@ -1357,12 +1560,19 @@ const styles = StyleSheet.create({
     borderRadius: 1,
     marginBottom: 16,
   },
+  cardDividerCompact: {
+    marginBottom: 6,
+  },
   translationText: {
     fontSize: 15,
     lineHeight: 24,
     color: '#cbd5e1',
     textAlign: 'center',
     fontStyle: 'italic',
+  },
+  translationTextCompact: {
+    fontSize: 12.5,
+    lineHeight: 18,
   },
   bottomSection: {
     paddingHorizontal: 24,
