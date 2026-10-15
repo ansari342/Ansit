@@ -7,22 +7,23 @@ import {
   LayoutChangeEvent,
   GestureResponderEvent,
 } from 'react-native';
+import Svg, { Path, Line, Rect, Circle, Text as SvgText, Defs, ClipPath, G } from 'react-native-svg';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { Reciter } from '../types';
 import { WordTiming } from '../data/reciterTimings';
 import {
-  generateVersePitchProfile,
-  extractAndMapVersePitchAsync,
-  samplePitchProfileAt,
+  VersePitchTrack,
+  MicPitchSample,
   MicPitchTracker,
-  LiveMicSample,
-  VersePitchProfile,
+  getVersePitchTrack,
+  extractVersePitchTrackAsync,
+  sampleTrackAtMs,
+  midiToNoteName,
 } from '../services/pitchService';
 import { setAudioVolume } from '../services/audioService';
 
 export type PitchPracticeMode = 'listen' | 'imitate' | 'echo';
-export type PitchKeyMode = 'relative' | 'exact';
 
 interface VocalPitchMonitorProps {
   surahNumber: number;
@@ -36,86 +37,49 @@ interface VocalPitchMonitorProps {
   ayahEndMs?: number;
   totalTrackDurationMs?: number;
   isPlaying: boolean;
-  echoPass: 1 | 2; // 1 = Listen to Reciter, 2 = Your Turn (Mic)
+  echoPass: 1 | 2;
   mode: PitchPracticeMode;
   onChangeMode: (mode: PitchPracticeMode) => void;
   onSeekFraction?: (fraction: number) => void;
 }
 
-interface Point2D {
-  x: number;
-  y: number;
-  isOnPitch?: boolean;
-  isVoiced?: boolean;
+interface TracePoint {
+  atMs: number;
+  midi: number;
+  isOnPitch: boolean;
 }
 
-/**
- * Pure React Native continuous curve renderer using anti-aliased rotated segment views.
- * Zero native SVG binary dependencies required; runs at 60fps.
- */
-const ContinuousCurveLine = React.memo<{
-  points: Point2D[];
-  color: string;
-  thickness?: number;
-  dashed?: boolean;
-  highlightOnPitch?: boolean;
-}>(({ points, color, thickness = 2.6, dashed = false, highlightOnPitch = false }) => {
-  if (points.length < 2) return null;
+const CANVAS_HEIGHT = 184;
+const LABEL_GUTTER = 30;
+const SAPPHIRE = '#9bbfff';
+const AMBER = '#fbbf24';
+const MINT = '#34d399';
 
-  return (
-    <View style={StyleSheet.absoluteFill} pointerEvents="none">
-      {points.map((pt, idx) => {
-        if (idx === 0) return null;
-        if (dashed && idx % 2 === 1) return null;
-
-        const prev = points[idx - 1];
-        // Break line cleanly across unvoiced breath pauses
-        if (pt.isVoiced === false || prev.isVoiced === false) return null;
-
-        const dx = pt.x - prev.x;
-        const dy = pt.y - prev.y;
-        // Skip large horizontal jumps (e.g., unvoiced silence gaps in mic trace)
-        if (dx < 0 || dx > 42) return null;
-
-        const length = Math.sqrt(dx * dx + dy * dy);
-        if (length < 0.5) return null;
-
-        const angleRad = Math.atan2(dy, dx);
-        const midX = (prev.x + pt.x) / 2;
-        const midY = (prev.y + pt.y) / 2;
-
-        const segColor =
-          highlightOnPitch && pt.isOnPitch !== undefined
-            ? pt.isOnPitch
-              ? '#ffffff'
-              : '#fbbf24'
-            : color;
-
-        return (
-          <View
-            key={idx}
-            style={{
-              position: 'absolute',
-              left: midX - (length + 1.2) / 2,
-              top: midY - thickness / 2,
-              width: length + 1.2,
-              height: thickness,
-              borderRadius: thickness / 2,
-              backgroundColor: segColor,
-              transform: [{ rotate: `${angleRad}rad` }],
-            }}
-          />
-        );
-      })}
-    </View>
-  );
-});
+/** Builds SVG path data for a pitch contour, breaking the stroke across unvoiced gaps. */
+function buildContourPath(
+  midi: number[],
+  frameToX: (frameIndex: number) => number,
+  midiToY: (midi: number) => number
+): string {
+  let d = '';
+  let penDown = false;
+  for (let i = 0; i < midi.length; i++) {
+    const m = midi[i];
+    if (m <= 0) {
+      penDown = false;
+      continue;
+    }
+    const x = frameToX(i).toFixed(1);
+    const y = midiToY(m).toFixed(1);
+    d += penDown ? ` L${x} ${y}` : ` M${x} ${y}`;
+    penDown = true;
+  }
+  return d;
+}
 
 export const VocalPitchMonitor: React.FC<VocalPitchMonitorProps> = ({
   surahNumber,
   ayahNumber,
-  words,
-  wordTimings,
   reciter,
   positionMillis,
   durationMillis,
@@ -128,577 +92,468 @@ export const VocalPitchMonitor: React.FC<VocalPitchMonitorProps> = ({
   onChangeMode,
   onSeekFraction,
 }) => {
-  const [canvasSize, setCanvasSize] = useState({ width: 320, height: 176 });
-  const [keyMode, setKeyMode] = useState<PitchKeyMode>('relative');
-  const [guideVolumeLevel, setGuideVolumeLevel] = useState<'20%' | 'Muted' | '50%'>('20%');
-  const [micPermissionDenied, setMicPermissionDenied] = useState<boolean>(false);
-  const [liveMappedProfile, setLiveMappedProfile] = useState<VersePitchProfile | null>(null);
-  const [isMappingPitch, setIsMappingPitch] = useState<boolean>(false);
-
-  // Recorded user pitch trace points for the current verse pass
-  const [userTrace, setUserTrace] = useState<LiveMicSample[]>([]);
-  const [latestMicSample, setLatestMicSample] = useState<LiveMicSample | null>(null);
+  const [canvasWidth, setCanvasWidth] = useState(320);
+  const [guideVolume, setGuideVolume] = useState<'20%' | 'Muted' | '50%'>('20%');
+  const [micState, setMicState] = useState<'off' | 'starting' | 'live' | 'denied' | 'unsupported'>('off');
+  const [liveTrack, setLiveTrack] = useState<VersePitchTrack | null>(null);
+  const [isMapping, setIsMapping] = useState(false);
+  const [trace, setTrace] = useState<TracePoint[]>([]);
+  const [latest, setLatest] = useState<MicPitchSample | null>(null);
   const [matchScore, setMatchScore] = useState<number | null>(null);
+  const [livePosMs, setLivePosMs] = useState(positionMillis);
 
-  const micTrackerRef = useRef<MicPitchTracker | null>(null);
-  const lastProgressRef = useRef<number>(0);
-  const progressRatioRef = useRef<number>(0);
-  const keyModeRef = useRef<PitchKeyMode>(keyMode);
-  keyModeRef.current = keyMode;
+  const trackerRef = useRef<MicPitchTracker | null>(null);
+  const posAnchorRef = useRef({ pos: positionMillis, at: Date.now() });
+  const livePosRef = useRef(positionMillis);
+  const scoreAccRef = useRef({ hits: 0, total: 0 });
 
-  const isMicActiveTurn =
-    mode === 'imitate' || (mode === 'echo' && echoPass === 2);
+  const isMicTurn = mode === 'imitate' || (mode === 'echo' && echoPass === 2);
 
-  // 1. Synchronous Reciter Pitch Profile (uses pre-extracted or cached recording contour immediately)
-  const syncProfile = useMemo(
-    () =>
-      generateVersePitchProfile(
-        surahNumber,
-        ayahNumber,
-        words,
-        wordTimings,
-        reciter
-      ),
-    [surahNumber, ayahNumber, words, wordTimings, reciter]
+  // ---- Time window of this ayah (absolute recording ms) ----
+  const windowStartMs = ayahStartMs;
+  const windowEndMs = ayahEndMs > ayahStartMs ? ayahEndMs : ayahStartMs + Math.max(1000, durationMillis);
+  const windowDurMs = Math.max(1, windowEndMs - windowStartMs);
+
+  // ---- Reciter pitch track: shipped HD map → coarse map → on-demand (web) ----
+  const shippedTrack = useMemo(
+    () => getVersePitchTrack(reciter, surahNumber, ayahNumber, windowStartMs, windowEndMs),
+    [reciter, surahNumber, ayahNumber, windowStartMs, windowEndMs]
   );
 
-  // If verse is not in pre-extracted database yet, decode the audio recording on-demand and map its real pitch
   useEffect(() => {
-    let isCancelled = false;
-    if (syncProfile.source === 'recording') {
-      setLiveMappedProfile(null);
-      setIsMappingPitch(false);
+    let cancelled = false;
+    setLiveTrack(null);
+    if (shippedTrack && shippedTrack.source === 'hd') {
+      setIsMapping(false);
       return;
     }
-
-    setIsMappingPitch(true);
-    extractAndMapVersePitchAsync(
-      reciter,
-      surahNumber,
-      ayahNumber,
-      ayahStartMs,
-      ayahEndMs > ayahStartMs ? ayahEndMs : ayahStartMs + Math.max(3000, durationMillis),
-      totalTrackDurationMs,
-      words,
-      wordTimings
-    )
-      .then(mapped => {
-        if (!isCancelled) {
-          setLiveMappedProfile(mapped);
-          setIsMappingPitch(false);
+    setIsMapping(true);
+    extractVersePitchTrackAsync(reciter, surahNumber, ayahNumber, windowStartMs, windowEndMs, totalTrackDurationMs)
+      .then(t => {
+        if (!cancelled) {
+          if (t) setLiveTrack(t);
+          setIsMapping(false);
         }
       })
       .catch(() => {
-        if (!isCancelled) {
-          setIsMappingPitch(false);
+        if (!cancelled) setIsMapping(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [shippedTrack, reciter, surahNumber, ayahNumber, windowStartMs, windowEndMs, totalTrackDurationMs]);
+
+  const track: VersePitchTrack | null = liveTrack ?? shippedTrack;
+  const trackRef = useRef(track);
+  trackRef.current = track;
+
+  // ---- Smooth 60 fps playhead interpolated between status ticks ----
+  useEffect(() => {
+    posAnchorRef.current = { pos: positionMillis, at: Date.now() };
+    livePosRef.current = positionMillis;
+    setLivePosMs(positionMillis);
+  }, [positionMillis]);
+
+  useEffect(() => {
+    if (!isPlaying) return;
+    let raf = 0;
+    const tick = () => {
+      const a = posAnchorRef.current;
+      const next = Math.min(windowDurMs, a.pos + (Date.now() - a.at));
+      livePosRef.current = next;
+      setLivePosMs(next);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [isPlaying, windowDurMs]);
+
+  const playheadAbsMs = windowStartMs + livePosMs;
+
+  // ---- Reset trace when verse / mode changes or the loop wraps ----
+  useEffect(() => {
+    setTrace([]);
+    setLatest(null);
+    setMatchScore(null);
+    scoreAccRef.current = { hits: 0, total: 0 };
+    trackerRef.current?.reset();
+  }, [surahNumber, ayahNumber, reciter.id, mode, echoPass]);
+
+  const lastPosForWrapRef = useRef(0);
+  useEffect(() => {
+    if (positionMillis < lastPosForWrapRef.current - 1500) {
+      setTrace([]);
+      scoreAccRef.current = { hits: 0, total: 0 };
+      setMatchScore(null);
+    }
+    lastPosForWrapRef.current = positionMillis;
+  }, [positionMillis]);
+
+  // ---- Guide audio volume while the microphone is active ----
+  useEffect(() => {
+    if (!isMicTurn) {
+      setAudioVolume(1.0);
+      return;
+    }
+    setAudioVolume(guideVolume === 'Muted' ? 0 : guideVolume === '20%' ? 0.2 : 0.5);
+  }, [isMicTurn, guideVolume]);
+
+  useEffect(() => () => {
+    setAudioVolume(1.0);
+  }, []);
+
+  // ---- Microphone lifecycle ----
+  useEffect(() => {
+    if (!isMicTurn) {
+      if (trackerRef.current) {
+        trackerRef.current.stop();
+        trackerRef.current = null;
+      }
+      setMicState('off');
+      setLatest(null);
+      return;
+    }
+
+    if (!MicPitchTracker.isSupported) {
+      setMicState('unsupported');
+      return;
+    }
+
+    let mounted = true;
+    const tracker = new MicPitchTracker();
+    trackerRef.current = tracker;
+    setMicState('starting');
+
+    tracker
+      .start(reading => {
+        if (!mounted) return;
+        const atMs = windowStartMs + livePosRef.current;
+        const sample = tracker.compare(reading, trackRef.current, atMs);
+        setLatest(sample);
+        if (!sample.isVoiced) return;
+
+        setTrace(prev => {
+          const trimmed =
+            prev.length > 0 && sample.atMs < prev[prev.length - 1].atMs - 1500 ? [] : prev;
+          const next = [...trimmed, { atMs: sample.atMs, midi: sample.displayMidi, isOnPitch: sample.isOnPitch }];
+          return next.length > 1400 ? next.slice(next.length - 1400) : next;
+        });
+
+        if (sample.targetIsVoiced) {
+          const acc = scoreAccRef.current;
+          acc.total += 1;
+          if (sample.isOnPitch) acc.hits += 1;
+          if (acc.total % 4 === 0) setMatchScore(Math.round((100 * acc.hits) / acc.total));
         }
+      })
+      .then(ok => {
+        if (!mounted) return;
+        setMicState(ok ? 'live' : 'denied');
       });
 
     return () => {
-      isCancelled = true;
+      mounted = false;
+      tracker.stop();
+      if (trackerRef.current === tracker) trackerRef.current = null;
     };
-  }, [
-    syncProfile.source,
-    reciter,
-    surahNumber,
-    ayahNumber,
-    ayahStartMs,
-    ayahEndMs,
-    totalTrackDurationMs,
-    durationMillis,
-    words,
-    wordTimings,
-  ]);
+  }, [isMicTurn]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const profile =
-    liveMappedProfile &&
-    liveMappedProfile.surahNumber === surahNumber &&
-    liveMappedProfile.ayahNumber === ayahNumber &&
-    liveMappedProfile.reciterId === (reciter.id === 'multiple' ? 'raad' : reciter.id)
-      ? liveMappedProfile
-      : syncProfile;
+  // ---- Geometry ----
+  const plotWidth = Math.max(10, canvasWidth - LABEL_GUTTER);
+  const minMidi = track?.minMidi ?? 45;
+  const maxMidi = track?.maxMidi ?? 60;
+  const midiSpan = Math.max(1, maxMidi - minMidi);
+  const midiToY = useCallback(
+    (m: number) => CANVAS_HEIGHT - ((m - minMidi) / midiSpan) * CANVAS_HEIGHT,
+    [minMidi, midiSpan]
+  );
+  const absMsToX = useCallback(
+    (ms: number) => ((ms - windowStartMs) / windowDurMs) * plotWidth,
+    [windowStartMs, windowDurMs, plotWidth]
+  );
 
-  const profileRef = useRef(profile);
-  profileRef.current = profile;
+  const reciterPath = useMemo(() => {
+    if (!track) return '';
+    return buildContourPath(
+      track.midi,
+      i => absMsToX(track.startMs + (i + 0.5) * track.hopMs),
+      midiToY
+    );
+  }, [track, absMsToX, midiToY]);
 
-  const progressRatio = useMemo(() => {
-    if (!durationMillis || durationMillis <= 1) return 0;
-    return Math.max(0, Math.min(1, positionMillis / durationMillis));
-  }, [positionMillis, durationMillis]);
-
-  progressRatioRef.current = progressRatio;
-
-  // Clear user mic trace when verse changes, mode changes, or playhead loops back to start
-  useEffect(() => {
-    if (progressRatio < lastProgressRef.current - 0.25) {
-      setUserTrace([]);
-    }
-    lastProgressRef.current = progressRatio;
-  }, [progressRatio]);
-
-  useEffect(() => {
-    setUserTrace([]);
-    setMatchScore(null);
-    setLatestMicSample(null);
-    micTrackerRef.current?.resetCalibration();
-  }, [surahNumber, ayahNumber, reciter.id, mode, echoPass]);
-
-  // 2. Manage Reciter Guide Audio Volume based on active mode & echo pass
-  useEffect(() => {
-    if (!isMicActiveTurn) {
-      setAudioVolume(1.0);
-    } else {
-      const vol =
-        guideVolumeLevel === 'Muted'
-          ? 0.0
-          : guideVolumeLevel === '20%'
-          ? 0.2
-          : 0.5;
-      setAudioVolume(vol);
-    }
-  }, [isMicActiveTurn, guideVolumeLevel]);
-
-  // Restore full volume on unmount
-  useEffect(() => {
-    return () => {
-      setAudioVolume(1.0);
+  const userPaths = useMemo(() => {
+    const on: string[] = [];
+    const off: string[] = [];
+    let cur = '';
+    let curOn: boolean | null = null;
+    let prev: TracePoint | null = null;
+    const flush = () => {
+      if (cur && curOn !== null) (curOn ? on : off).push(cur);
+      cur = '';
     };
-  }, []);
-
-  // 3. Start/Stop Real-Time Microphone Pitch Tracker when in Imitate or Auto-Echo Pass 2
-  useEffect(() => {
-    let isMounted = true;
-
-    if (isMicActiveTurn) {
-      const tracker = new MicPitchTracker();
-      micTrackerRef.current = tracker;
-
-      tracker
-        .start(rawSample => {
-          if (!isMounted) return;
-          const t = progressRatioRef.current;
-          const mapped = tracker.mapSampleToProfile(
-            rawSample,
-            profileRef.current,
-            t,
-            keyModeRef.current
-          );
-          setLatestMicSample(mapped);
-
-          if (mapped.isVoiced) {
-            setUserTrace(prev => {
-              // Avoid duplicate points at identical timestamps and cap at 90 points
-              const filtered =
-                prev.length > 0 && mapped.t < prev[prev.length - 1].t - 0.15
-                  ? []
-                  : prev.filter(p => Math.abs(p.t - mapped.t) > 0.008);
-              const next = [...filtered, mapped];
-
-              // Compute rolling Pitch Match % score (0-100%)
-              let totalScore = 0;
-              for (const pt of next) {
-                const absCents = Math.abs(pt.centsOffset);
-                const ptScore = Math.max(0, 100 - Math.max(0, absCents - 18) * 0.75);
-                totalScore += ptScore;
-              }
-              setMatchScore(Math.round(totalScore / next.length));
-              return next;
-            });
-          }
-        })
-        .then(started => {
-          if (isMounted && !started) {
-            setMicPermissionDenied(true);
-          } else if (isMounted) {
-            setMicPermissionDenied(false);
-          }
-        });
-
-      return () => {
-        isMounted = false;
-        tracker.stop();
-        micTrackerRef.current = null;
-      };
-    } else {
-      if (micTrackerRef.current) {
-        micTrackerRef.current.stop();
-        micTrackerRef.current = null;
+    for (const p of trace) {
+      const x = absMsToX(p.atMs).toFixed(1);
+      const y = midiToY(p.midi).toFixed(1);
+      const gap = prev ? p.atMs - prev.atMs : 0;
+      if (!prev || gap > 220 || gap < 0 || curOn !== p.isOnPitch) {
+        flush();
+        curOn = p.isOnPitch;
+        cur = prev && gap <= 220 && gap >= 0
+          ? `M${absMsToX(prev.atMs).toFixed(1)} ${midiToY(prev.midi).toFixed(1)} L${x} ${y}`
+          : `M${x} ${y}`;
+      } else {
+        cur += ` L${x} ${y}`;
       }
-      setLatestMicSample(null);
+      prev = p;
     }
-  }, [isMicActiveTurn]);
+    flush();
+    return { on: on.join(' '), off: off.join(' ') };
+  }, [trace, absMsToX, midiToY]);
+
+  const gridLines = useMemo(() => {
+    const step = midiSpan > 18 ? 3 : midiSpan > 12 ? 2 : 1;
+    const lines: { y: number; label: string; strong: boolean }[] = [];
+    for (let m = Math.ceil(minMidi); m <= Math.floor(maxMidi); m++) {
+      const isC = ((m % 12) + 12) % 12 === 0;
+      if ((m - Math.ceil(minMidi)) % step === 0 || isC) {
+        lines.push({ y: midiToY(m), label: midiToNoteName(m), strong: isC });
+      }
+    }
+    return lines;
+  }, [minMidi, maxMidi, midiSpan, midiToY]);
+
+  const target = track ? sampleTrackAtMs(track, playheadAbsMs) : null;
+  const playheadX = Math.max(0, Math.min(plotWidth, absMsToX(playheadAbsMs)));
+  const orbMidi = isMicTurn && latest?.isVoiced ? latest.displayMidi : target?.isVoiced ? target.midi : 0;
+  const orbY = orbMidi > 0 ? midiToY(orbMidi) : null;
+
+  const noteBadge = isMicTurn && latest?.isVoiced
+    ? `${latest.noteName} • ${Math.round(latest.rawFreqHz)} Hz`
+    : target?.isVoiced
+    ? `${target.noteName} • ${Math.round(target.freqHz)} Hz`
+    : '— • pause';
 
   const handleLayout = useCallback((e: LayoutChangeEvent) => {
-    const { width, height } = e.nativeEvent.layout;
-    if (width > 20 && height > 20) {
-      setCanvasSize({ width, height });
-    }
+    const w = e.nativeEvent.layout.width;
+    if (w > 20) setCanvasWidth(w);
   }, []);
 
   const handleCanvasTouch = useCallback(
     (e: GestureResponderEvent) => {
-      if (!onSeekFraction || canvasSize.width <= 0) return;
-      const x = e.nativeEvent.locationX;
-      const fraction = Math.max(0, Math.min(0.99, x / canvasSize.width));
+      if (!onSeekFraction || plotWidth <= 0) return;
+      const fraction = Math.max(0, Math.min(0.99, e.nativeEvent.locationX / plotWidth));
       onSeekFraction(fraction);
     },
-    [onSeekFraction, canvasSize.width]
+    [onSeekFraction, plotWidth]
   );
-
-  const toggleKeyMode = useCallback(() => {
-    Haptics.selectionAsync().catch(() => {});
-    setKeyMode(prev => (prev === 'relative' ? 'exact' : 'relative'));
-    micTrackerRef.current?.resetCalibration();
-  }, []);
 
   const cycleGuideVolume = useCallback(() => {
     Haptics.selectionAsync().catch(() => {});
-    setGuideVolumeLevel(prev =>
-      prev === '20%' ? 'Muted' : prev === 'Muted' ? '50%' : '20%'
-    );
+    setGuideVolume(v => (v === '20%' ? 'Muted' : v === 'Muted' ? '50%' : '20%'));
   }, []);
 
-  // Sample reciter's target pitch at current playhead
-  const currentReciterTarget = useMemo(
-    () => samplePitchProfileAt(profile, progressRatio),
-    [profile, progressRatio]
-  );
-
-  const laneHeight = canvasSize.height / 8;
-
-  // Convert full reciter contour (96 pts) to 2D canvas coordinates
-  const ghostContourPoints = useMemo<Point2D[]>(() => {
-    const w = canvasSize.width;
-    return profile.contourPoints.map(pt => ({
-      x: pt.t * w,
-      y: (pt.laneFloat + 0.5) * laneHeight,
-      isVoiced: pt.isVoiced,
-    }));
-  }, [profile.contourPoints, canvasSize.width, laneHeight]);
-
-  // Active white pitch line:
-  // - In Listen mode (or Auto-Echo Pass 1): slices ghostContourPoints up to progressRatio
-  // - In Imitate mode (or Auto-Echo Pass 2): maps userTrace points
-  const activeWhitePoints = useMemo<Point2D[]>(() => {
-    const w = canvasSize.width;
-    if (!isMicActiveTurn) {
-      const count = Math.max(
-        2,
-        Math.floor(progressRatio * profile.contourPoints.length)
-      );
-      return ghostContourPoints.slice(0, count);
-    } else {
-      return userTrace.map(pt => ({
-        x: pt.t * w,
-        y: (pt.laneFloat + 0.5) * laneHeight,
-        isOnPitch: pt.isOnPitch,
-        isVoiced: pt.isVoiced,
-      }));
+  const statusText = (() => {
+    if (isMapping && !track) return 'Mapping reciter pitch from recording…';
+    if (!track) return 'Pitch map not available for this verse yet';
+    if (!isMicTurn) {
+      return `${reciter.shortName} voice map • ${track.source === 'hd' ? '10 ms resolution' : 'coarse'}`;
     }
-  }, [
-    isMicActiveTurn,
-    progressRatio,
-    profile.contourPoints.length,
-    ghostContourPoints,
-    userTrace,
-    canvasSize.width,
-    laneHeight,
-  ]);
-
-  // Playhead cursor position
-  const playheadX = progressRatio * canvasSize.width;
-  const playheadY = useMemo(() => {
-    if (isMicActiveTurn && latestMicSample?.isVoiced) {
-      return (latestMicSample.laneFloat + 0.5) * laneHeight;
+    if (micState === 'starting') return 'Starting microphone…';
+    if (micState === 'denied') return 'Microphone access denied — enable it in Settings';
+    if (micState === 'unsupported') return 'Microphone pitch tracking unavailable on this device';
+    if (latest?.isVoiced) {
+      if (!latest.targetIsVoiced) return 'Reciter is pausing here';
+      if (latest.isOnPitch) return '● On pitch';
+      return latest.centsOffset > 0
+        ? `▲ ${Math.abs(latest.centsOffset)}¢ sharp`
+        : `▼ ${Math.abs(latest.centsOffset)}¢ flat`;
     }
-    return (currentReciterTarget.laneFloat + 0.5) * laneHeight;
-  }, [isMicActiveTurn, latestMicSample, currentReciterTarget.laneFloat, laneHeight]);
+    return 'Listening… recite along with the blue line';
+  })();
 
-  // Live note badge text
-  const activeNoteLabel = useMemo(() => {
-    if (isMicActiveTurn && latestMicSample?.isVoiced) {
-      return `${latestMicSample.noteName} • ${latestMicSample.rawFreqHz} Hz`;
-    }
-    return `${currentReciterTarget.noteName} • ${currentReciterTarget.freqHz} Hz`;
-  }, [isMicActiveTurn, latestMicSample, currentReciterTarget]);
+  const statusStyle =
+    isMicTurn && latest?.isVoiced && latest.targetIsVoiced
+      ? latest.isOnPitch
+        ? styles.statusOn
+        : styles.statusOff
+      : micState === 'denied' || micState === 'unsupported'
+      ? styles.statusWarn
+      : styles.statusIdle;
 
   return (
     <View style={styles.card}>
-      {/* 1. TOP STUDIO HEADER: 3-WAY MODE SWITCHER & KEY/GUIDE CONTROLS */}
+      {/* Mode switcher */}
       <View style={styles.topRow}>
-        <View style={styles.modeSegmentContainer}>
-          <TouchableOpacity
-            style={[
-              styles.modeSegmentBtn,
-              mode === 'listen' && styles.modeSegmentBtnActive,
-            ]}
-            onPress={() => {
-              Haptics.selectionAsync().catch(() => {});
-              onChangeMode('listen');
-            }}
-          >
-            <Ionicons
-              name="headset-outline"
-              size={12}
-              color={mode === 'listen' ? '#9bbfff' : '#7e8ca3'}
-            />
-            <Text
-              style={[
-                styles.modeSegmentText,
-                mode === 'listen' && styles.modeSegmentTextActive,
-              ]}
+        <View style={styles.segment}>
+          {(
+            [
+              ['listen', 'headset-outline', 'Listen'],
+              ['imitate', 'mic-outline', 'Imitate'],
+              ['echo', 'repeat-outline', 'Auto-Echo'],
+            ] as const
+          ).map(([key, icon, label]) => (
+            <TouchableOpacity
+              key={key}
+              style={[styles.segmentBtn, mode === key && styles.segmentBtnActive]}
+              onPress={() => {
+                Haptics.selectionAsync().catch(() => {});
+                onChangeMode(key);
+              }}
             >
-              Listen
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.modeSegmentBtn,
-              mode === 'imitate' && styles.modeSegmentBtnActive,
-            ]}
-            onPress={() => {
-              Haptics.selectionAsync().catch(() => {});
-              onChangeMode('imitate');
-            }}
-          >
-            <Ionicons
-              name="mic-outline"
-              size={12}
-              color={mode === 'imitate' ? '#9bbfff' : '#7e8ca3'}
-            />
-            <Text
-              style={[
-                styles.modeSegmentText,
-                mode === 'imitate' && styles.modeSegmentTextActive,
-              ]}
-            >
-              Imitate
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.modeSegmentBtn,
-              mode === 'echo' && styles.modeSegmentBtnActive,
-            ]}
-            onPress={() => {
-              Haptics.selectionAsync().catch(() => {});
-              onChangeMode('echo');
-            }}
-          >
-            <Ionicons
-              name="repeat-outline"
-              size={12}
-              color={mode === 'echo' ? '#9bbfff' : '#7e8ca3'}
-            />
-            <Text
-              style={[
-                styles.modeSegmentText,
-                mode === 'echo' && styles.modeSegmentTextActive,
-              ]}
-            >
-              Auto-Echo
-            </Text>
-          </TouchableOpacity>
-        </View>
-
-        <View style={styles.rightPillsRow}>
-          {isMicActiveTurn && (
-            <TouchableOpacity style={styles.smallSettingPill} onPress={cycleGuideVolume}>
-              <Ionicons
-                name={guideVolumeLevel === 'Muted' ? 'volume-mute-outline' : 'volume-low-outline'}
-                size={12}
-                color="#9bbfff"
-              />
-              <Text style={styles.smallSettingText}>{guideVolumeLevel}</Text>
+              <Ionicons name={icon} size={12} color={mode === key ? SAPPHIRE : '#7e8ca3'} />
+              <Text style={[styles.segmentText, mode === key && styles.segmentTextActive]}>{label}</Text>
             </TouchableOpacity>
-          )}
-
-          <TouchableOpacity style={styles.keyPill} onPress={toggleKeyMode}>
-            <Text style={styles.keyPillText}>
-              {keyMode === 'relative' ? 'Auto-Octave' : 'Exact Hz'}
-            </Text>
-          </TouchableOpacity>
+          ))}
         </View>
+
+        {isMicTurn && (
+          <TouchableOpacity style={styles.pill} onPress={cycleGuideVolume}>
+            <Ionicons
+              name={guideVolume === 'Muted' ? 'volume-mute-outline' : 'volume-low-outline'}
+              size={12}
+              color={SAPPHIRE}
+            />
+            <Text style={styles.pillText}>Guide {guideVolume}</Text>
+          </TouchableOpacity>
+        )}
       </View>
 
-      {/* 2. TELEMETRY STATUS BAR: LIVE NOTE, TUNING STATUS & MATCH % */}
+      {/* Telemetry */}
       <View style={styles.telemetryRow}>
         <View style={styles.telemetryLeft}>
           <View style={styles.noteBadge}>
-            <Text style={styles.noteBadgeText}>{activeNoteLabel}</Text>
+            <Text style={styles.noteBadgeText}>{noteBadge}</Text>
           </View>
-
-          {isMappingPitch ? (
-            <Text style={styles.statusIdleText}>
-              Mapping pitch from recording...
-            </Text>
-          ) : micPermissionDenied && isMicActiveTurn ? (
-            <Text style={styles.warningText}>Enable Mic in Settings</Text>
-          ) : isMicActiveTurn ? (
-            latestMicSample?.isVoiced ? (
-              <Text
-                style={[
-                  styles.tuningStatusText,
-                  latestMicSample.isOnPitch
-                    ? styles.tuningOnPitch
-                    : styles.tuningOffPitch,
-                ]}
-              >
-                {latestMicSample.isOnPitch
-                  ? '● On Pitch'
-                  : latestMicSample.centsOffset > 0
-                  ? '▲ Slightly High'
-                  : '▼ Slightly Low'}
-              </Text>
-            ) : (
-              <Text style={styles.statusIdleText}>Recite into mic to trace pitch...</Text>
-            )
-          ) : (
-            <Text style={styles.statusIdleText}>
-              {reciter.shortName} Ghost Pitch{profile.source === 'recording' ? ' • Audio Mapped' : ''}
-            </Text>
-          )}
+          <Text style={[styles.statusText, statusStyle]} numberOfLines={1}>
+            {statusText}
+          </Text>
         </View>
-
         <View style={styles.telemetryRight}>
           {mode === 'echo' && (
-            <View
-              style={[
-                styles.echoPhaseBadge,
-                echoPass === 2 && styles.echoPhaseMicBadge,
-              ]}
-            >
-              <Text
-                style={[
-                  styles.echoPhaseText,
-                  echoPass === 2 && styles.echoPhaseMicText,
-                ]}
-              >
-                {echoPass === 1 ? 'Pass 1: Listen' : 'Pass 2: Your Turn'}
+            <View style={[styles.echoBadge, echoPass === 2 && styles.echoBadgeMic]}>
+              <Text style={[styles.echoText, echoPass === 2 && styles.echoTextMic]}>
+                {echoPass === 1 ? 'Pass 1: Listen' : 'Pass 2: Your turn'}
               </Text>
             </View>
           )}
-
-          {matchScore !== null && (mode === 'imitate' || mode === 'echo') && (
-            <View style={styles.matchScoreBadge}>
-              <Text style={styles.matchScoreText}>{matchScore}% Match</Text>
+          {matchScore !== null && isMicTurn && (
+            <View style={styles.scoreBadge}>
+              <Text style={styles.scoreText}>{matchScore}% match</Text>
             </View>
           )}
         </View>
       </View>
 
-      {/* 3. MELODYNE-STYLE VOCAL PITCH CANVAS (MATCHING AYA COLOR SCHEME) */}
+      {/* Pitch canvas */}
       <View
-        style={styles.canvasContainer}
+        style={styles.canvas}
         onLayout={handleLayout}
         onStartShouldSetResponder={() => true}
         onResponderGrant={handleCanvasTouch}
         onResponderMove={handleCanvasTouch}
       >
-        {/* A. 8 Alternating Semitone Lanes */}
-        {profile.lanes.map((lane, idx) => (
-          <View
-            key={lane.laneIndex}
-            style={[
-              styles.laneRow,
-              {
-                height: laneHeight,
-                backgroundColor: idx % 2 === 0 ? '#0c1220' : '#11192b',
-              },
-            ]}
-          >
-            <Text style={styles.laneNoteLabel}>{lane.noteName}</Text>
-          </View>
-        ))}
+        <Svg width={canvasWidth} height={CANVAS_HEIGHT}>
+          <Defs>
+            <ClipPath id="playedClip">
+              <Rect x={0} y={0} width={Math.max(0, playheadX)} height={CANVAS_HEIGHT} />
+            </ClipPath>
+          </Defs>
 
-        {/* B. Quantized Target Note Blocks (Gilded Amber/Gold Blocks) */}
-        {profile.targetBlocks.map((block, bIdx) => {
-          const left = block.startRatio * canvasSize.width;
-          const width = Math.max(6, (block.endRatio - block.startRatio) * canvasSize.width);
-          const top = block.laneIndex * laneHeight + 1;
-          const isCurrentBlock =
-            progressRatio >= block.startRatio && progressRatio <= block.endRatio;
+          {/* Semitone grid */}
+          {gridLines.map((g, i) => (
+            <G key={i}>
+              <Line
+                x1={0}
+                x2={plotWidth}
+                y1={g.y}
+                y2={g.y}
+                stroke={g.strong ? '#27395c' : '#1a2540'}
+                strokeWidth={g.strong ? 1 : 0.75}
+              />
+              <SvgText
+                x={canvasWidth - 4}
+                y={g.y + 3.5}
+                fontSize={9.5}
+                fontWeight="700"
+                fill={g.strong ? '#7f94b8' : '#52627a'}
+                textAnchor="end"
+              >
+                {g.label}
+              </SvgText>
+            </G>
+          ))}
 
-          return (
-            <View
-              key={`block_${bIdx}`}
-              pointerEvents="none"
-              style={[
-                styles.targetNoteBlock,
-                isCurrentBlock && styles.targetNoteBlockActive,
-                {
-                  left,
-                  top,
-                  width,
-                  height: Math.max(6, laneHeight - 2),
-                },
-              ]}
+          {/* Reciter voice map (ghost) */}
+          {reciterPath !== '' && (
+            <Path
+              d={reciterPath}
+              stroke={SAPPHIRE}
+              strokeOpacity={isMicTurn ? 0.55 : 0.32}
+              strokeWidth={isMicTurn ? 2 : 2.4}
+              fill="none"
+              strokeLinecap="round"
+              strokeLinejoin="round"
             />
-          );
-        })}
+          )}
 
-        {/* C. Reciter Ghost Pitch Contour (Sapphire Blue #9bbfff Guide Curve) */}
-        <ContinuousCurveLine
-          points={ghostContourPoints}
-          color={
-            isMicActiveTurn
-              ? 'rgba(155, 191, 255, 0.58)'
-              : 'rgba(155, 191, 255, 0.30)'
-          }
-          thickness={2.2}
-          dashed={isMicActiveTurn}
-        />
+          {/* Played portion in Listen mode */}
+          {!isMicTurn && reciterPath !== '' && (
+            <Path
+              d={reciterPath}
+              stroke="#ffffff"
+              strokeWidth={2.8}
+              fill="none"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              clipPath="url(#playedClip)"
+            />
+          )}
 
-        {/* D. Active Live Pitch Line (Crisp White Line matching screenshot) */}
-        <ContinuousCurveLine
-          points={activeWhitePoints}
-          color="#ffffff"
-          thickness={3.0}
-          highlightOnPitch={isMicActiveTurn}
-        />
+          {/* Your voice */}
+          {isMicTurn && userPaths.off !== '' && (
+            <Path d={userPaths.off} stroke={AMBER} strokeWidth={2.8} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+          )}
+          {isMicTurn && userPaths.on !== '' && (
+            <Path d={userPaths.on} stroke="#ffffff" strokeWidth={3} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+          )}
 
-        {/* E. Subtle Playhead Vertical Guide Line & Glowing Pitch Orb */}
-        <View
-          pointerEvents="none"
-          style={[
-            styles.playheadVerticalLine,
-            { left: Math.max(0, Math.min(canvasSize.width - 1, playheadX)) },
-          ]}
-        />
-        <View
-          pointerEvents="none"
-          style={[
-            styles.playheadOrb,
-            isMicActiveTurn &&
-              latestMicSample?.isVoiced &&
-              latestMicSample.isOnPitch &&
-              styles.playheadOrbMatched,
-            {
-              left: Math.max(0, Math.min(canvasSize.width - 10, playheadX - 5)),
-              top: Math.max(0, Math.min(canvasSize.height - 10, playheadY - 5)),
-            },
-          ]}
-        />
+          {/* Playhead */}
+          <Line x1={playheadX} x2={playheadX} y1={0} y2={CANVAS_HEIGHT} stroke={SAPPHIRE} strokeOpacity={0.3} strokeWidth={1} />
+          {orbY !== null && (
+            <Circle
+              cx={playheadX}
+              cy={orbY}
+              r={5}
+              fill="#ffffff"
+              stroke={isMicTurn && latest?.isOnPitch ? MINT : SAPPHIRE}
+              strokeWidth={2}
+            />
+          )}
+        </Svg>
 
-        {/* F. Compact Legend Overlay */}
-        <View style={styles.legendOverlay} pointerEvents="none">
+        <View style={styles.legend} pointerEvents="none">
           <View style={styles.legendItem}>
-            <View style={styles.legendSwatchBlock} />
-            <Text style={styles.legendText}>Target Note</Text>
+            <View style={[styles.legendSwatch, { backgroundColor: SAPPHIRE }]} />
+            <Text style={styles.legendText}>{reciter.shortName}</Text>
           </View>
           <View style={styles.legendItem}>
-            <View style={styles.legendSwatchGhost} />
-            <Text style={styles.legendText}>Ghost Contour</Text>
+            <View style={[styles.legendSwatch, { backgroundColor: '#ffffff' }]} />
+            <Text style={styles.legendText}>{isMicTurn ? 'You (on pitch)' : 'Played'}</Text>
           </View>
-          <View style={styles.legendItem}>
-            <View style={styles.legendSwatchWhite} />
-            <Text style={styles.legendText}>
-              {isMicActiveTurn ? 'Your Voice' : 'Reciter Pitch'}
-            </Text>
-          </View>
+          {isMicTurn && (
+            <View style={styles.legendItem}>
+              <View style={[styles.legendSwatch, { backgroundColor: AMBER }]} />
+              <Text style={styles.legendText}>Off pitch</Text>
+            </View>
+          )}
         </View>
+
+        {!track && !isMapping && (
+          <View style={styles.emptyOverlay} pointerEvents="none">
+            <Ionicons name="pulse-outline" size={18} color="#52627a" />
+            <Text style={styles.emptyText}>Reciter voice map coming soon for this verse</Text>
+          </View>
+        )}
       </View>
     </View>
   );
@@ -725,7 +580,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     gap: 6,
   },
-  modeSegmentContainer: {
+  segment: {
     flexDirection: 'row',
     backgroundColor: '#0a0f1a',
     borderRadius: 11,
@@ -733,7 +588,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#1c273d',
   },
-  modeSegmentBtn: {
+  segmentBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
@@ -741,26 +596,14 @@ const styles = StyleSheet.create({
     paddingVertical: 5,
     borderRadius: 8,
   },
-  modeSegmentBtnActive: {
+  segmentBtnActive: {
     backgroundColor: '#1a2842',
     borderWidth: 1,
     borderColor: '#2d446e',
   },
-  modeSegmentText: {
-    fontSize: 11.5,
-    fontWeight: '600',
-    color: '#7e8ca3',
-  },
-  modeSegmentTextActive: {
-    color: '#9bbfff',
-    fontWeight: '700',
-  },
-  rightPillsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  smallSettingPill: {
+  segmentText: { fontSize: 11.5, fontWeight: '600', color: '#7e8ca3' },
+  segmentTextActive: { color: SAPPHIRE, fontWeight: '700' },
+  pill: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 3,
@@ -771,37 +614,17 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     borderRadius: 8,
   },
-  smallSettingText: {
-    color: '#c9d3e7',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  keyPill: {
-    backgroundColor: '#272010',
-    borderWidth: 1,
-    borderColor: '#6b5424',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 8,
-  },
-  keyPillText: {
-    color: '#e5b869',
-    fontSize: 11,
-    fontWeight: '700',
-  },
+  pillText: { color: '#c9d3e7', fontSize: 11, fontWeight: '600' },
   telemetryRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     marginBottom: 8,
     minHeight: 24,
+    gap: 6,
   },
-  telemetryLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    flexShrink: 1,
-  },
+  telemetryLeft: { flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 1, flex: 1 },
+  telemetryRight: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   noteBadge: {
     backgroundColor: '#162136',
     borderWidth: 1,
@@ -810,38 +633,13 @@ const styles = StyleSheet.create({
     paddingVertical: 2.5,
     borderRadius: 7,
   },
-  noteBadgeText: {
-    color: '#9bbfff',
-    fontSize: 11.5,
-    fontWeight: '700',
-    letterSpacing: 0.2,
-  },
-  tuningStatusText: {
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  tuningOnPitch: {
-    color: '#34d399',
-  },
-  tuningOffPitch: {
-    color: '#fbbf24',
-  },
-  statusIdleText: {
-    color: '#8a95aa',
-    fontSize: 11.5,
-    fontWeight: '500',
-  },
-  warningText: {
-    color: '#f87171',
-    fontSize: 11.5,
-    fontWeight: '600',
-  },
-  telemetryRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  echoPhaseBadge: {
+  noteBadgeText: { color: SAPPHIRE, fontSize: 11.5, fontWeight: '700', letterSpacing: 0.2 },
+  statusText: { fontSize: 11.5, fontWeight: '600', flexShrink: 1 },
+  statusIdle: { color: '#8a95aa', fontWeight: '500' },
+  statusOn: { color: MINT, fontWeight: '700' },
+  statusOff: { color: AMBER, fontWeight: '700' },
+  statusWarn: { color: '#f87171' },
+  echoBadge: {
     backgroundColor: '#162238',
     borderWidth: 1,
     borderColor: '#2b426b',
@@ -849,19 +647,10 @@ const styles = StyleSheet.create({
     paddingVertical: 2.5,
     borderRadius: 8,
   },
-  echoPhaseMicBadge: {
-    backgroundColor: '#272010',
-    borderColor: '#8c6b28',
-  },
-  echoPhaseText: {
-    color: '#9bbfff',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  echoPhaseMicText: {
-    color: '#e5b869',
-  },
-  matchScoreBadge: {
+  echoBadgeMic: { backgroundColor: '#272010', borderColor: '#8c6b28' },
+  echoText: { color: SAPPHIRE, fontSize: 11, fontWeight: '700' },
+  echoTextMic: { color: '#e5b869' },
+  scoreBadge: {
     backgroundColor: 'rgba(16, 185, 129, 0.16)',
     borderWidth: 1,
     borderColor: 'rgba(52, 211, 153, 0.45)',
@@ -869,13 +658,9 @@ const styles = StyleSheet.create({
     paddingVertical: 2.5,
     borderRadius: 8,
   },
-  matchScoreText: {
-    color: '#34d399',
-    fontSize: 11.5,
-    fontWeight: '800',
-  },
-  canvasContainer: {
-    height: 172,
+  scoreText: { color: MINT, fontSize: 11.5, fontWeight: '800' },
+  canvas: {
+    height: CANVAS_HEIGHT,
     width: '100%',
     borderRadius: 14,
     overflow: 'hidden',
@@ -884,56 +669,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#0c1220',
     position: 'relative',
   },
-  laneRow: {
-    width: '100%',
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#1a253a',
-    justifyContent: 'center',
-    alignItems: 'flex-end',
-    paddingRight: 8,
-  },
-  laneNoteLabel: {
-    color: '#52627a',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  targetNoteBlock: {
-    position: 'absolute',
-    backgroundColor: 'rgba(217, 130, 24, 0.72)',
-    borderRadius: 3,
-    borderWidth: 0.8,
-    borderColor: 'rgba(229, 184, 105, 0.55)',
-  },
-  targetNoteBlockActive: {
-    backgroundColor: 'rgba(232, 152, 36, 0.92)',
-    borderColor: '#fbbf24',
-  },
-  playheadVerticalLine: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    width: 1,
-    backgroundColor: 'rgba(155, 191, 255, 0.28)',
-  },
-  playheadOrb: {
-    position: 'absolute',
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: '#ffffff',
-    borderWidth: 2,
-    borderColor: '#9bbfff',
-    shadowColor: '#9bbfff',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.9,
-    shadowRadius: 5,
-    elevation: 4,
-  },
-  playheadOrbMatched: {
-    borderColor: '#34d399',
-    shadowColor: '#34d399',
-  },
-  legendOverlay: {
+  legend: {
     position: 'absolute',
     top: 6,
     left: 8,
@@ -947,30 +683,14 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#1d2940',
   },
-  legendItem: {
-    flexDirection: 'row',
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  legendSwatch: { width: 10, height: 2.5, borderRadius: 1 },
+  legendText: { color: '#b8c5db', fontSize: 10, fontWeight: '600' },
+  emptyOverlay: {
+    ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
-    gap: 4,
+    justifyContent: 'center',
+    gap: 6,
   },
-  legendSwatchBlock: {
-    width: 9,
-    height: 6,
-    borderRadius: 1.5,
-    backgroundColor: '#e0891b',
-  },
-  legendSwatchGhost: {
-    width: 10,
-    height: 2,
-    backgroundColor: '#9bbfff',
-  },
-  legendSwatchWhite: {
-    width: 10,
-    height: 2.5,
-    backgroundColor: '#ffffff',
-  },
-  legendText: {
-    color: '#b8c5db',
-    fontSize: 10,
-    fontWeight: '600',
-  },
+  emptyText: { color: '#52627a', fontSize: 11.5, fontWeight: '600' },
 });

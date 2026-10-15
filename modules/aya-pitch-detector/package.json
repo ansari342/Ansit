@@ -1,0 +1,7 @@
+{
+  "name": "aya-pitch-detector",
+  "version": "1.0.0",
+  "description": "Native iOS real-time microphone fundamental-frequency (pitch) detector for Aya's Vocal Pitch Monitor",
+  "main": "index.ts",
+  "private": true
+}
