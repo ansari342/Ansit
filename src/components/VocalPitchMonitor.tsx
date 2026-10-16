@@ -94,6 +94,12 @@ export const VocalPitchMonitor: React.FC<VocalPitchMonitorProps> = ({
 }) => {
   const [canvasWidth, setCanvasWidth] = useState(320);
   const [guideVolume, setGuideVolume] = useState<'20%' | 'Muted' | '50%'>('20%');
+  const [keyMode, setKeyMode] = useState<'auto' | 'exact'>('auto');
+  const keyModeRef = useRef<'auto' | 'exact'>('auto');
+  useEffect(() => {
+    keyModeRef.current = keyMode;
+    trackerRef.current?.reset();
+  }, [keyMode]);
   const [micState, setMicState] = useState<'off' | 'starting' | 'live' | 'denied' | 'unsupported'>('off');
   const [liveTrack, setLiveTrack] = useState<VersePitchTrack | null>(null);
   const [isMapping, setIsMapping] = useState(false);
@@ -228,7 +234,7 @@ export const VocalPitchMonitor: React.FC<VocalPitchMonitorProps> = ({
       .start(reading => {
         if (!mounted) return;
         const atMs = windowStartMs + livePosRef.current;
-        const sample = tracker.compare(reading, trackRef.current, atMs);
+        const sample = tracker.compare(reading, trackRef.current, atMs, keyModeRef.current);
         setLatest(sample);
         if (!sample.isVoiced) return;
 
@@ -406,6 +412,20 @@ export const VocalPitchMonitor: React.FC<VocalPitchMonitorProps> = ({
         </View>
 
         {isMicTurn && (
+          <TouchableOpacity
+            style={[styles.pill, keyMode === 'auto' && styles.pillGold]}
+            onPress={() => {
+              Haptics.selectionAsync().catch(() => {});
+              setKeyMode(k => (k === 'auto' ? 'exact' : 'auto'));
+            }}
+          >
+            <Ionicons name="musical-notes-outline" size={12} color={keyMode === 'auto' ? AMBER : SAPPHIRE} />
+            <Text style={[styles.pillText, keyMode === 'auto' && { color: AMBER }]}>
+              {keyMode === 'auto' ? (latest && latest.keyOffsetSemitones !== 0 ? `Auto key ${latest.keyOffsetSemitones > 0 ? '+' : ''}${latest.keyOffsetSemitones} st` : 'Auto key') : 'Exact pitch'}
+            </Text>
+          </TouchableOpacity>
+        )}
+        {isMicTurn && (
           <TouchableOpacity style={styles.pill} onPress={cycleGuideVolume}>
             <Ionicons
               name={guideVolume === 'Muted' ? 'volume-mute-outline' : 'volume-low-outline'}
@@ -571,6 +591,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginBottom: 8,
     gap: 6,
+    flexWrap: 'wrap',
   },
   segment: {
     flexDirection: 'row',
@@ -607,6 +628,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
   },
   pillText: { color: '#c9d3e7', fontSize: 11, fontWeight: '600' },
+  pillGold: { borderColor: '#6b5424', backgroundColor: '#272010' },
   telemetryRow: {
     flexDirection: 'row',
     alignItems: 'center',

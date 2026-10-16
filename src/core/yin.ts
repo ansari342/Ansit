@@ -11,9 +11,9 @@ export interface PitchEstimate {
 export function detectPitchHzFromFloatSamples(
   x: ArrayLike<number>,
   sampleRate: number,
-  fMin: number = 70,
+  fMin: number = 60,
   fMax: number = 500,
-  rmsGate: number = 0.006
+  rmsGate: number = 0.0035
 ): PitchEstimate {
   const n = x.length;
   let energy = 0;

@@ -314,6 +314,8 @@ export interface MicPitchSample {
   /** Signed difference user − reciter in cents, after octave folding. */
   centsOffset: number;
   isOnPitch: boolean;
+  /** Semitones the user's register sits from the reciter's (Auto key), 0 in Exact mode. */
+  keyOffsetSemitones: number;
 }
 
 export interface RawMicReading {
@@ -331,6 +333,9 @@ export class MicPitchTracker {
   private nativeSub: Subscription | null = null;
   private webCleanup: (() => void) | null = null;
   private smoothedMidi: number | null = null;
+  private keyOffsets: number[] = [];
+  /** Learned register offset (semitones, user − reciter) in Auto key mode. */
+  private keyOffset = 0;
   private lastVoicedAt = 0;
 
   static get isSupported(): boolean {
@@ -409,14 +414,18 @@ export class MicPitchTracker {
 
   /**
    * Compares a raw microphone reading against the reciter's track at the current playback time.
-   * The user's pitch is folded by whole octaves toward the reciter so a lower/higher natural voice
-   * is judged on the melody (interval contour), not on the absolute octave.
+   *
+   * keyMode 'auto'  (Auto key): learns how far your natural register sits from the reciter's
+   *                 (median of recent user − reciter differences, any interval, not just octaves)
+   *                 and judges the melody relative to that. A deeper or higher voice is never
+   *                 penalised for its register, only for the contour.
+   * keyMode 'exact': absolute pitch, folded by whole octaves only.
    */
-  compare(reading: RawMicReading, track: VersePitchTrack | null, atMs: number): MicPitchSample {
+  compare(reading: RawMicReading, track: VersePitchTrack | null, atMs: number, keyMode: 'auto' | 'exact' = 'auto'): MicPitchSample {
     const target = track ? sampleTrackAtMs(track, atMs) : { midi: 0, isVoiced: false, freqHz: 0, noteName: '—' };
     const now = Date.now();
 
-    if (reading.freqHz === null || reading.rms < 0.006) {
+    if (reading.freqHz === null || reading.rms < 0.004) {
       // Hold the last pitch for 120 ms across consonants so the trace doesn't flicker
       if (this.smoothedMidi !== null && now - this.lastVoicedAt > 120) {
         this.smoothedMidi = null;
@@ -432,6 +441,7 @@ export class MicPitchTracker {
         targetIsVoiced: target.isVoiced,
         centsOffset: 0,
         isOnPitch: false,
+        keyOffsetSemitones: this.keyOffset,
       };
     }
 
@@ -446,11 +456,34 @@ export class MicPitchTracker {
     }
     const userMidi = this.smoothedMidi;
 
-    // Octave folding toward the reciter's register
     let displayMidi = userMidi;
-    const anchor = target.isVoiced ? target.midi : track ? (track.minMidi + track.maxMidi) / 2 : userMidi;
-    while (displayMidi - anchor > 6) displayMidi -= 12;
-    while (anchor - displayMidi > 6) displayMidi += 12;
+    if (keyMode === 'auto') {
+      // Learn the register offset from voiced moments where the reciter is also voiced
+      if (target.isVoiced) {
+        // Fold the raw difference into ±6 st first so a single octave jump doesn't poison the median
+        let diff = userMidi - target.midi;
+        while (diff > 6) diff -= 12;
+        while (diff < -6) diff += 12;
+        const octaves = Math.round((userMidi - target.midi - diff) / 12) * 12;
+        this.keyOffsets.push(diff + octaves);
+        if (this.keyOffsets.length > 40) this.keyOffsets.shift();
+        if (this.keyOffsets.length >= 6) {
+          const sorted = [...this.keyOffsets].sort((a, b) => a - b);
+          const median = sorted[Math.floor(sorted.length / 2)];
+          // Snap to whole semitones so the trace sits on the reciter's grid instead of drifting
+          this.keyOffset = Math.round(median);
+        }
+      }
+      displayMidi = userMidi - this.keyOffset;
+      // Residual octave folding for the first few samples before the offset is learned
+      const anchor = target.isVoiced ? target.midi : track ? (track.minMidi + track.maxMidi) / 2 : displayMidi;
+      while (displayMidi - anchor > 6) displayMidi -= 12;
+      while (anchor - displayMidi > 6) displayMidi += 12;
+    } else {
+      const anchor = target.isVoiced ? target.midi : track ? (track.minMidi + track.maxMidi) / 2 : userMidi;
+      while (displayMidi - anchor > 6) displayMidi -= 12;
+      while (anchor - displayMidi > 6) displayMidi += 12;
+    }
 
     const centsOffset = target.isVoiced ? Math.round((displayMidi - target.midi) * 100) : 0;
     const isOnPitch = target.isVoiced && Math.abs(centsOffset) <= 75;
@@ -466,11 +499,14 @@ export class MicPitchTracker {
       targetIsVoiced: target.isVoiced,
       centsOffset,
       isOnPitch,
+      keyOffsetSemitones: this.keyOffset,
     };
   }
 
   reset(): void {
     this.smoothedMidi = null;
+    this.keyOffsets = [];
+    this.keyOffset = 0;
   }
 
   async stop(): Promise<void> {

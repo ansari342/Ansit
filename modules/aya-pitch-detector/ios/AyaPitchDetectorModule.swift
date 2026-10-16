@@ -195,11 +195,11 @@ public class AyaPitchDetectorModule: Module {
     var energy: Float = 0
     for v in x { energy += v * v }
     let rms = sqrt(energy / Float(max(1, n)))
-    if rms < 0.006 {
+    if rms < 0.0035 {
       return (nil, 1, rms)
     }
 
-    let fMin = 70.0
+    let fMin = 60.0
     let fMax = 500.0
     let minLag = Int(sampleRate / fMax)
     let maxLag = min(Int(sampleRate / fMin), n / 2)
