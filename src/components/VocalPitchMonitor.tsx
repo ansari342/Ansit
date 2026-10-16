@@ -23,7 +23,7 @@ import {
 } from '../services/pitchService';
 import { setAudioVolume } from '../services/audioService';
 
-export type PitchPracticeMode = 'listen' | 'imitate' | 'echo';
+export type PitchPracticeMode = 'listen' | 'imitate';
 
 interface VocalPitchMonitorProps {
   surahNumber: number;
@@ -107,7 +107,7 @@ export const VocalPitchMonitor: React.FC<VocalPitchMonitorProps> = ({
   const livePosRef = useRef(positionMillis);
   const scoreAccRef = useRef({ hits: 0, total: 0 });
 
-  const isMicTurn = mode === 'imitate' || (mode === 'echo' && echoPass === 2);
+  const isMicTurn = mode === 'imitate';
 
   // ---- Time window of this ayah (absolute recording ms) ----
   const windowStartMs = ayahStartMs;
@@ -387,9 +387,8 @@ export const VocalPitchMonitor: React.FC<VocalPitchMonitorProps> = ({
         <View style={styles.segment}>
           {(
             [
-              ['listen', 'headset-outline', 'Listen'],
+              ['listen', 'headset-outline', 'Trace'],
               ['imitate', 'mic-outline', 'Imitate'],
-              ['echo', 'repeat-outline', 'Auto-Echo'],
             ] as const
           ).map(([key, icon, label]) => (
             <TouchableOpacity
@@ -429,13 +428,6 @@ export const VocalPitchMonitor: React.FC<VocalPitchMonitorProps> = ({
           </Text>
         </View>
         <View style={styles.telemetryRight}>
-          {mode === 'echo' && (
-            <View style={[styles.echoBadge, echoPass === 2 && styles.echoBadgeMic]}>
-              <Text style={[styles.echoText, echoPass === 2 && styles.echoTextMic]}>
-                {echoPass === 1 ? 'Pass 1: Listen' : 'Pass 2: Your turn'}
-              </Text>
-            </View>
-          )}
           {matchScore !== null && isMicTurn && (
             <View style={styles.scoreBadge}>
               <Text style={styles.scoreText}>{matchScore}% match</Text>

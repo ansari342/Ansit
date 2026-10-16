@@ -13,6 +13,7 @@ import { resolveInstantTimeline, resolveExactTimeline, effectiveReciter } from '
 import { rescaleToDuration, segmentFor } from '../core/timeline';
 import { usePlaybackEngine } from '../hooks/usePlaybackEngine';
 import { LadderConfig, LadderProgress, describeStep } from '../services/hifzLadderService';
+import { stopTakePlayback } from '../services/takeService';
 import { updateCarPlayState, clearNowPlayingState, registerNowPlayingHandlers } from '../services/carPlayService';
 import { recordListenSession } from '../services/analyticsService';
 import { LoopSettingsModal } from './LoopSettingsModal';
@@ -23,8 +24,9 @@ import { VocalPitchMonitor, PitchPracticeMode } from './VocalPitchMonitor';
 import { HifzLadderHud } from './HifzLadderHud';
 import { HifzLadderSetupModal } from './HifzLadderSetupModal';
 import { VerseHero } from './VerseHero';
-import { ModeSheet, PlayerMode } from './ModeSheet';
-import { colors, space, radius, type, pill, shadow } from '../theme';
+import { ReciteCorrect, ReciteControls, ReciteStage } from './ReciteCorrect';
+import { Segmented } from './ui/Segmented';
+import { colors, space, type, pill, shadow } from '../theme';
 
 export interface LadderSessionConfig {
   config: LadderConfig;
@@ -53,6 +55,9 @@ interface NowPlayingScreenProps {
   onPlaybackStateChange?: (state: PlaybackStateReport) => void;
 }
 
+type Tab = 'listen' | 'test';
+type TestMode = 'recite' | 'pitch';
+
 const DEFAULT_LOOP: LoopSettings = { mode: 'range', verseRepeatCount: 1, playbackSpeed: 1.0, delayBetweenVersesSeconds: 0 };
 
 export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
@@ -74,13 +79,15 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
   const [loopSettings, setLoopSettings] = useState<LoopSettings>(initialLoopSettings || DEFAULT_LOOP);
   const [trackDurationMs, setTrackDurationMs] = useState(1);
   const [reciterIndex, setReciterIndex] = useState(0);
-  const [mode, setMode] = useState<PlayerMode>(ladder ? 'ladder' : 'listen');
+  const [tab, setTab] = useState<Tab>('listen');
+  const [testMode, setTestMode] = useState<TestMode>('recite');
   const [pitchMode, setPitchMode] = useState<PitchPracticeMode>('listen');
-  const [modeSheetVisible, setModeSheetVisible] = useState(false);
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [ladderSetupVisible, setLadderSetupVisible] = useState(false);
   const [reciteRemainingSec, setReciteRemainingSec] = useState<number | null>(null);
   const [isPeeking, setIsPeeking] = useState(false);
+  const [reciteStage, setReciteStage] = useState<ReciteStage>('idle');
+  const reciteControlsRef = useRef<ReciteControls | null>(null);
 
   const isMultipleMode = reciter.id === 'multiple';
   const currentReciter = isMultipleMode ? BASE_RECITERS[reciterIndex] : reciter;
@@ -108,10 +115,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     },
     onReciteTimerCleared: stopReciteCountdown,
     onReciteTimerFired: stopReciteCountdown,
-    onLadderExited: () => {
-      setMode('listen');
-      onExitLadder?.();
-    },
+    onLadderExited: () => onExitLadder?.(),
     onNextReciter: startVerse => {
       const nextIndex = (reciterIndex + 1) % BASE_RECITERS.length;
       setReciterIndex(nextIndex);
@@ -134,6 +138,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
   useEffect(() => {
     ladderRef.current = ladder;
   }, [ladder]);
+
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -171,12 +176,12 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     })();
     return () => {
       mounted = false;
+      stopTakePlayback();
       stopAndUnloadAudio();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [surah.number, reciter.id, fromVerse, toVerse, sessionId]);
 
-  // Estimated timelines are rescaled once the real recording length is known
   useEffect(() => {
     const t = engine.getState().timeline;
     if (t && t.source === 'estimated' && trackDurationMs > 1000) {
@@ -185,7 +190,6 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     }
   }, [trackDurationMs, engine, dispatch]);
 
-  // Loop settings → engine config + playback rate
   useEffect(() => {
     dispatch({
       type: 'SET_CONFIG',
@@ -193,11 +197,11 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         mode: loopSettings.mode,
         verseRepeatCount: loopSettings.verseRepeatCount,
         delayBetweenVersesMs: loopSettings.delayBetweenVersesSeconds * 1000,
-        echo: mode === 'pitch' && pitchMode === 'echo',
+        echo: false,
       },
     });
     setAudioRate(loopSettings.playbackSpeed);
-  }, [loopSettings, mode, pitchMode, dispatch]);
+  }, [loopSettings, dispatch]);
 
   useEffect(() => () => clearNowPlayingState(), []);
 
@@ -211,7 +215,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
   const seg = segmentFor(state.timeline, state.verse);
   const absolutePosMs = isSingleFile ? (seg?.startMs ?? 0) + state.positionMs : state.positionMs;
   const activeWordIndex = useMemo(() => {
-    if (wordTimings.length === 0 || !state.isPlaying && state.positionMs === 0) return -1;
+    if (wordTimings.length === 0 || (!state.isPlaying && state.positionMs === 0)) return -1;
     for (let i = 0; i < wordTimings.length; i++) {
       if (absolutePosMs >= wordTimings[i].startMs && absolutePosMs < wordTimings[i].endMs) return i;
     }
@@ -220,9 +224,31 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
 
   const ladderState = state.ladder;
   const ladderActive = !!ladderState;
-  const isReciting = ladderState?.phase === 'recite';
-  const showPitch = mode === 'pitch' && !ladderActive;
+  const isLadderReciting = ladderState?.phase === 'recite';
+  const isTest = tab === 'test';
+  const showPitch = isTest && testMode === 'pitch';
+  const showRecite = isTest && testMode === 'recite';
   const showBismillah = surah.number !== 1 && surah.number !== 9 && state.verse === 1;
+  const compactHero = showPitch || ladderActive;
+
+  // ---------------------------------------------------------------- tab switching
+  const selectTab = useCallback(
+    (next: Tab) => {
+      if (next === tab) return;
+      setTab(next);
+      if (next === 'test') {
+        dispatch({ type: 'PAUSE' });
+      } else {
+        stopTakePlayback();
+      }
+    },
+    [tab, dispatch]
+  );
+
+  // Pitch Trace needs the reciter playing; Recite needs it silent
+  useEffect(() => {
+    if (showRecite) dispatch({ type: 'PAUSE' });
+  }, [showRecite, dispatch]);
 
   // ---------------------------------------------------------------- Now Playing / mini-player
   useEffect(() => {
@@ -270,52 +296,87 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
   );
 
   // ---------------------------------------------------------------- handlers
-  const handleSelectMode = (next: PlayerMode) => {
-    setModeSheetVisible(false);
-    if (next === 'ladder') {
-      if (ladderActive) return;
-      setLadderSetupVisible(true);
-      return;
-    }
-    if (ladderActive) dispatch({ type: 'LADDER_EXIT' });
-    setMode(next);
-  };
-
-  const handleSeekAyah = useCallback((verse: number, fraction: number = 0) => dispatch({ type: 'SEEK_VERSE', verse, fraction }), [dispatch]);
+  const handleSeekAyah = useCallback(
+    (verse: number, fraction: number = 0) => {
+      if (showRecite) dispatch({ type: 'SET_VERSE', verse });
+      else dispatch({ type: 'SEEK_VERSE', verse, fraction });
+    },
+    [dispatch, showRecite]
+  );
+  const prev = useCallback(() => (showRecite ? dispatch({ type: 'SET_VERSE', verse: state.verse - 1 }) : dispatch({ type: 'PREV' })), [dispatch, showRecite, state.verse]);
+  const next = useCallback(() => (showRecite ? dispatch({ type: 'SET_VERSE', verse: state.verse + 1 }) : dispatch({ type: 'NEXT' })), [dispatch, showRecite, state.verse]);
   const cycleLoopMode = useCallback(() => {
     const order: LoopSettings['mode'][] = ['range', 'single', 'off'];
-    setLoopSettings(prev => ({ ...prev, mode: order[(order.indexOf(prev.mode) + 1) % order.length] }));
+    setLoopSettings(p => ({ ...p, mode: order[(order.indexOf(p.mode) + 1) % order.length] }));
   }, []);
+  const toggleMemorize = useCallback(() => {
+    Haptics.selectionAsync().catch(() => {});
+    if (ladderActive) dispatch({ type: 'LADDER_EXIT' });
+    else setLadderSetupVisible(true);
+  }, [ladderActive, dispatch]);
 
-  const modeLabel = ladderActive ? 'Hifz Ladder' : mode === 'pitch' ? 'Pitch Match' : null;
-  const modeTone = pill(ladderActive || mode === 'pitch' ? 'gold' : 'sapphire');
+  // ---------------------------------------------------------------- center button
+  const renderCenter = () => {
+    if (showRecite) {
+      const stage = reciteStage;
+      const icon = stage === 'idle' ? 'mic' : stage === 'recording' ? 'stop' : 'play';
+      const bg = stage === 'recording' ? colors.danger : colors.gold;
+      return (
+        <BouncyTouchable style={[styles.primaryBtn, { backgroundColor: bg }, shadow.glow(bg)]} triggerOnPressIn onPress={() => reciteControlsRef.current?.primary()}>
+          <Ionicons name={icon} size={stage === 'idle' ? 30 : 32} color={stage === 'recording' ? colors.text : colors.bg} style={icon === 'play' ? { marginLeft: 3 } : undefined} />
+        </BouncyTouchable>
+      );
+    }
+    if (isLadderReciting) {
+      return (
+        <BouncyTouchable style={[styles.primaryBtn, { backgroundColor: colors.gold }, shadow.glow(colors.gold)]} triggerOnPressIn onPress={() => dispatch({ type: 'LADDER_COMPLETE_REP' })}>
+          <Ionicons name="checkmark" size={34} color={colors.bg} />
+        </BouncyTouchable>
+      );
+    }
+    if (ladderState?.phase === 'complete') {
+      return (
+        <BouncyTouchable style={[styles.primaryBtn, { backgroundColor: colors.mint }, shadow.glow(colors.mint)]} triggerOnPressIn onPress={() => dispatch({ type: 'LADDER_RESTART' })}>
+          <Ionicons name="refresh" size={30} color={colors.bg} />
+        </BouncyTouchable>
+      );
+    }
+    return (
+      <BouncyTouchable style={[styles.primaryBtn, shadow.glow(colors.sapphire)]} triggerOnPressIn onPress={toggle}>
+        <Ionicons name={state.isPlaying ? 'pause' : 'play'} size={32} color={colors.bg} style={!state.isPlaying ? { marginLeft: 3 } : undefined} />
+      </BouncyTouchable>
+    );
+  };
+
+  const memorizePill = pill(ladderActive ? 'gold' : 'neutral');
 
   // ---------------------------------------------------------------- render
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor={colors.bg} />
 
-      {/* Header: back · (mode badge) · settings */}
+      {/* Header: back · Listen | Test · settings */}
       <View style={styles.header}>
         <TouchableOpacity style={styles.iconBtn} onPress={onMinimize} hitSlop={8}>
           <Ionicons name="chevron-down" size={24} color={colors.text} />
         </TouchableOpacity>
-        {modeLabel ? (
-          <TouchableOpacity style={modeTone.container} onPress={() => setModeSheetVisible(true)}>
-            <Ionicons name={ladderActive ? 'layers' : 'mic'} size={12} color={modeTone.color} />
-            <Text style={modeTone.text}>{modeLabel}</Text>
-          </TouchableOpacity>
-        ) : (
-          <View />
-        )}
+        <Segmented<Tab>
+          options={[
+            { key: 'listen', label: 'Listen' },
+            { key: 'test', label: 'Test' },
+          ]}
+          value={tab}
+          onChange={selectTab}
+          tone={isTest ? 'gold' : 'sapphire'}
+        />
         <TouchableOpacity style={styles.iconBtn} onPress={() => setSettingsVisible(true)} hitSlop={8}>
           <Ionicons name="ellipsis-horizontal" size={22} color={colors.text} />
         </TouchableOpacity>
       </View>
 
-      {/* Title */}
-      <View style={[styles.titleBlock, (showPitch || ladderActive) && styles.titleBlockCompact]}>
-        <Text style={[styles.title, (showPitch || ladderActive) && styles.titleCompact]}>Surah {surah.englishName}</Text>
+      {/* Title + one sub-control */}
+      <View style={[styles.titleBlock, compactHero && styles.titleBlockCompact]}>
+        <Text style={[styles.title, compactHero && styles.titleCompact]}>Surah {surah.englishName}</Text>
         <View style={styles.subtitleRow}>
           {isMultipleMode && (
             <View style={pill('gold').container}>
@@ -323,13 +384,39 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
               <Text style={pill('gold').text}>Multiple</Text>
             </View>
           )}
-          <Text style={styles.subtitle}>{currentReciter.name}</Text>
-          <SoundwaveVisualizer isPlaying={state.isPlaying} color={colors.sapphire} barCount={4} maxHeight={14} />
+          <Text style={styles.subtitle}>{isTest ? `Verse ${state.verse} · ` : ''}{currentReciter.name}</Text>
+          {!isTest && <SoundwaveVisualizer isPlaying={state.isPlaying} color={colors.sapphire} barCount={4} maxHeight={14} />}
+        </View>
+
+        <View style={styles.subControl}>
+          {isTest ? (
+            <Segmented<TestMode>
+              options={[
+                { key: 'recite', label: 'Recite', icon: 'mic-outline' },
+                { key: 'pitch', label: 'Pitch', icon: 'pulse-outline' },
+              ]}
+              value={testMode}
+              onChange={m => {
+                stopTakePlayback();
+                setTestMode(m);
+              }}
+              tone="gold"
+              size="sm"
+            />
+          ) : (
+            <TouchableOpacity style={memorizePill.container} onPress={toggleMemorize}>
+              <Ionicons name={ladderActive ? 'layers' : 'layers-outline'} size={12} color={memorizePill.color} />
+              <Text style={memorizePill.text}>
+                {ladderActive && ladderState ? `Memorize · step ${ladderState.stepIndex + 1}/${ladderState.plan.length}` : 'Memorize'}
+              </Text>
+              {ladderActive && <Ionicons name="close" size={12} color={memorizePill.color} />}
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 
-      {/* Ladder HUD */}
-      {ladderState && (
+      {/* Ladder HUD (Listen only) */}
+      {!isTest && ladderState && (
         <HifzLadderHud
           plan={ladderState.plan}
           stepIndex={ladderState.stepIndex}
@@ -344,44 +431,58 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         />
       )}
 
-      {/* Verse hero (+ pitch monitor) */}
+      {/* Middle */}
       <View style={styles.middle}>
-        <VerseHero
-          verse={currentVerse}
-          verseNumber={state.verse}
-          words={words}
-          activeWordIndex={activeWordIndex}
-          showBismillah={showBismillah}
-          compact={showPitch}
-          hidden={isReciting && !isPeeking}
-          onPeekStart={() => setIsPeeking(true)}
-          onPeekEnd={() => setIsPeeking(false)}
-          onDoubleTap={() => dispatch({ type: 'LADDER_HEAR_AGAIN' })}
-        />
-        {showPitch && (
-          <View style={styles.pitchWrap}>
-            <VocalPitchMonitor
-              surahNumber={surah.number}
-              ayahNumber={state.verse}
+        {showRecite ? (
+          <ReciteCorrect
+            key={`${surah.number}_${state.verse}`}
+            surahNumber={surah.number}
+            verse={state.verse}
+            verseData={currentVerse}
+            words={words}
+            onStageChange={setReciteStage}
+            controlRef={reciteControlsRef}
+          />
+        ) : (
+          <>
+            <VerseHero
+              verse={currentVerse}
+              verseNumber={state.verse}
               words={words}
-              wordTimings={wordTimings}
-              reciter={currentReciter}
-              positionMillis={state.positionMs}
-              durationMillis={state.durationMs}
-              ayahStartMs={seg?.startMs ?? 0}
-              ayahEndMs={seg?.endMs ?? 0}
-              totalTrackDurationMs={trackDurationMs}
-              isPlaying={state.isPlaying}
-              echoPass={state.echoPass}
-              mode={pitchMode}
-              onChangeMode={setPitchMode}
-              onSeekFraction={fraction => handleSeekAyah(state.verse, fraction)}
+              activeWordIndex={activeWordIndex}
+              showBismillah={showBismillah}
+              compact={compactHero}
+              hidden={!isTest && isLadderReciting && !isPeeking}
+              onPeekStart={() => setIsPeeking(true)}
+              onPeekEnd={() => setIsPeeking(false)}
+              onDoubleTap={() => dispatch({ type: 'LADDER_HEAR_AGAIN' })}
             />
-          </View>
+            {showPitch && (
+              <View style={styles.pitchWrap}>
+                <VocalPitchMonitor
+                  surahNumber={surah.number}
+                  ayahNumber={state.verse}
+                  words={words}
+                  wordTimings={wordTimings}
+                  reciter={currentReciter}
+                  positionMillis={state.positionMs}
+                  durationMillis={state.durationMs}
+                  ayahStartMs={seg?.startMs ?? 0}
+                  ayahEndMs={seg?.endMs ?? 0}
+                  totalTrackDurationMs={trackDurationMs}
+                  isPlaying={state.isPlaying}
+                  echoPass={1}
+                  mode={pitchMode}
+                  onChangeMode={setPitchMode}
+                  onSeekFraction={fraction => handleSeekAyah(state.verse, fraction)}
+                />
+              </View>
+            )}
+          </>
         )}
       </View>
 
-      {/* Scrubber + transport */}
+      {/* Scrubber + transport (identical in every state except the center button) */}
       <View style={styles.bottom}>
         <SegmentedPlaybackBar
           fromVerse={state.activeFrom}
@@ -393,47 +494,36 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         />
 
         <View style={styles.transport}>
-          <BouncyTouchable style={styles.secondaryBtn} onPress={() => setModeSheetVisible(true)}>
-            <Ionicons name={ladderActive ? 'layers-outline' : mode === 'pitch' ? 'mic-outline' : 'headset-outline'} size={21} color={ladderActive || mode === 'pitch' ? colors.gold : colors.textMuted} />
-          </BouncyTouchable>
-
-          <BouncyTouchable style={styles.secondaryBtn} triggerOnPressIn onPress={() => dispatch({ type: 'PREV' })}>
+          <BouncyTouchable style={styles.secondaryBtn} triggerOnPressIn onPress={prev}>
             <Ionicons name="play-skip-back" size={26} color={colors.text} />
           </BouncyTouchable>
 
-          {isReciting ? (
-            <BouncyTouchable style={[styles.primaryBtn, { backgroundColor: colors.gold }, shadow.glow(colors.gold)]} triggerOnPressIn onPress={() => dispatch({ type: 'LADDER_COMPLETE_REP' })}>
-              <Ionicons name="checkmark" size={34} color={colors.bg} />
-            </BouncyTouchable>
-          ) : ladderState?.phase === 'complete' ? (
-            <BouncyTouchable style={[styles.primaryBtn, { backgroundColor: colors.mint }, shadow.glow(colors.mint)]} triggerOnPressIn onPress={() => dispatch({ type: 'LADDER_RESTART' })}>
-              <Ionicons name="refresh" size={30} color={colors.bg} />
-            </BouncyTouchable>
-          ) : (
-            <BouncyTouchable style={[styles.primaryBtn, shadow.glow(colors.sapphire)]} triggerOnPressIn onPress={toggle}>
-              <Ionicons name={state.isPlaying ? 'pause' : 'play'} size={32} color={colors.bg} style={!state.isPlaying ? { marginLeft: 3 } : undefined} />
-            </BouncyTouchable>
-          )}
+          {renderCenter()}
 
-          <BouncyTouchable style={styles.secondaryBtn} triggerOnPressIn onPress={() => dispatch({ type: 'NEXT' })}>
+          <BouncyTouchable style={styles.secondaryBtn} triggerOnPressIn onPress={next}>
             <Ionicons name="play-skip-forward" size={26} color={colors.text} />
           </BouncyTouchable>
 
-          <BouncyTouchable style={styles.secondaryBtn} triggerOnPressIn disabled={ladderActive} onPress={cycleLoopMode}>
-            <Ionicons
-              name={loopSettings.mode === 'single' ? 'repeat-outline' : 'repeat'}
-              size={22}
-              color={ladderActive ? colors.textFaint : loopSettings.mode !== 'off' ? colors.sapphire : colors.textMuted}
-            />
-            {!ladderActive && loopSettings.mode !== 'off' && <View style={styles.loopDot} />}
-            {!ladderActive && loopSettings.verseRepeatCount > 1 && (
-              <Text style={styles.repeatCount}>{state.playCount}/{loopSettings.verseRepeatCount}</Text>
-            )}
-          </BouncyTouchable>
+          {showRecite ? (
+            <BouncyTouchable style={styles.secondaryBtn} disabled={reciteStage !== 'review'} onPress={() => reciteControlsRef.current?.playAB()}>
+              <Ionicons name="repeat" size={22} color={reciteStage === 'review' ? colors.gold : colors.textFaint} />
+              <Text style={[styles.cornerLabel, { color: reciteStage === 'review' ? colors.gold : colors.textFaint }]}>A·B</Text>
+            </BouncyTouchable>
+          ) : (
+            <BouncyTouchable style={styles.secondaryBtn} triggerOnPressIn disabled={ladderActive} onPress={cycleLoopMode}>
+              <Ionicons
+                name={loopSettings.mode === 'single' ? 'repeat-outline' : 'repeat'}
+                size={22}
+                color={ladderActive ? colors.textFaint : loopSettings.mode !== 'off' ? colors.sapphire : colors.textMuted}
+              />
+              {!ladderActive && loopSettings.mode !== 'off' && <View style={styles.loopDot} />}
+              {!ladderActive && loopSettings.verseRepeatCount > 1 && (
+                <Text style={styles.cornerLabel}>{state.playCount}/{loopSettings.verseRepeatCount}</Text>
+              )}
+            </BouncyTouchable>
+          )}
         </View>
       </View>
-
-      <ModeSheet visible={modeSheetVisible} mode={ladderActive ? 'ladder' : mode} onSelect={handleSelectMode} onClose={() => setModeSheetVisible(false)} />
 
       <HifzLadderSetupModal
         visible={ladderSetupVisible}
@@ -444,16 +534,12 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         onClose={() => setLadderSetupVisible(false)}
         onStart={(config, resume) => {
           setLadderSetupVisible(false);
+          setTab('listen');
           onStartLadder?.(config, resume);
         }}
       />
 
-      <LoopSettingsModal
-        visible={settingsVisible}
-        settings={loopSettings}
-        onUpdateSettings={setLoopSettings}
-        onClose={() => setSettingsVisible(false)}
-      />
+      <LoopSettingsModal visible={settingsVisible} settings={loopSettings} onUpdateSettings={setLoopSettings} onClose={() => setSettingsVisible(false)} />
     </SafeAreaView>
   );
 };
@@ -476,12 +562,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  titleBlock: { alignItems: 'center', paddingTop: space.sm, paddingBottom: space.md },
+  titleBlock: { alignItems: 'center', paddingTop: space.sm, paddingBottom: space.sm },
   titleBlockCompact: { paddingTop: 2, paddingBottom: space.xs },
   title: { ...type.title, fontSize: 26 },
   titleCompact: { fontSize: 20 },
   subtitleRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: 4 },
   subtitle: { ...type.bodyMuted, fontSize: 14 },
+  subControl: { marginTop: space.sm, alignItems: 'center' },
   middle: { flex: 1, minHeight: 0 },
   pitchWrap: { paddingHorizontal: space.xl, paddingBottom: space.sm },
   bottom: { paddingBottom: space.lg },
@@ -492,7 +579,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.lg,
     marginTop: space.sm,
   },
-  secondaryBtn: { width: 52, height: 52, alignItems: 'center', justifyContent: 'center' },
+  secondaryBtn: { width: 56, height: 56, alignItems: 'center', justifyContent: 'center' },
   primaryBtn: {
     width: 72,
     height: 72,
@@ -502,5 +589,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   loopDot: { position: 'absolute', bottom: 8, width: 4, height: 4, borderRadius: 2, backgroundColor: colors.sapphire },
-  repeatCount: { position: 'absolute', top: 4, right: 2, ...type.caption, color: colors.sapphire, fontSize: 9.5 },
+  cornerLabel: { position: 'absolute', bottom: 4, ...type.caption, color: colors.sapphire, fontSize: 9.5 },
 });
+

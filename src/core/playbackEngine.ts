@@ -69,6 +69,8 @@ export type EngineEvent =
   | { type: 'NEXT' }
   | { type: 'PREV' }
   | { type: 'SEEK_VERSE'; verse: number; fraction: number }
+  /** Move to a verse WITHOUT playing (Test mode navigation). Pauses the player. */
+  | { type: 'SET_VERSE'; verse: number }
   | { type: 'SET_CONFIG'; config: Partial<EngineConfig> }
   | { type: 'RECITER_CHANGED'; timeline: Timeline | null; startVerse: number }
   | { type: 'LADDER_COMPLETE_REP' }
@@ -415,6 +417,21 @@ export function reduce(s: EngineState, e: EngineEvent): Result {
       const verse = clamp(e.verse, s.activeFrom, s.activeTo);
       const offset = Math.round(clamp(e.fraction, 0, 0.995) * segmentDurationMs(s.timeline, verse));
       return go({ ...s, playCount: verse === s.verse ? s.playCount : 1 }, verse, offset);
+    }
+
+    case 'SET_VERSE': {
+      const verse = clamp(e.verse, s.config.fromVerse, s.config.toVerse);
+      const next: EngineState = {
+        ...applyPendingTimeline(s),
+        verse,
+        positionMs: 0,
+        durationMs: segmentDurationMs(s.timeline, verse),
+        playCount: 1,
+        echoPass: 1,
+        isPlaying: false,
+        transitioning: false,
+      };
+      return ok(next, [{ type: 'PAUSE' }]);
     }
 
     case 'SET_CONFIG': {

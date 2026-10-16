@@ -126,6 +126,18 @@ describe('PlaybackEngine — single-file reciter', () => {
     expect(h.engine.getState().playCount).toBe(1);
   });
 
+  it('SET_VERSE moves silently and pauses (Test mode navigation)', () => {
+    const h = harness();
+    h.engine.dispatch({ type: 'LOAD', config: cfg(), timeline: fatiha });
+    h.engine.dispatch({ type: 'SET_VERSE', verse: 3 });
+    const s = h.engine.getState();
+    expect(s.verse).toBe(3);
+    expect(s.isPlaying).toBe(false);
+    expect(s.positionMs).toBe(0);
+    expect(h.plays()).toEqual([1]);
+    expect(h.log[h.log.length - 1].type).toBe('PAUSE');
+  });
+
   it('inserts the configured delay between verses', () => {
     const h = harness();
     h.engine.dispatch({ type: 'LOAD', config: cfg({ delayBetweenVersesMs: 2000 }), timeline: fatiha });
