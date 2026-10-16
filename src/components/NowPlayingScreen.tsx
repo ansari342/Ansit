@@ -1,62 +1,30 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import {
-  View,
-  Text,
-  TouchableOpacity,
-  StyleSheet,
-  SafeAreaView,
-  StatusBar,
-  ScrollView,
-  Animated,
-  Pressable,
-} from 'react-native';
-import { Ionicons, MaterialIcons, Feather } from '@expo/vector-icons';
+import { View, Text, TouchableOpacity, StyleSheet, SafeAreaView, StatusBar } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { Surah, Verse, Reciter, LoopSettings } from '../types';
 import { getVersesForSurah, parseArabicWords } from '../services/quranService';
-import {
-  loadAndPlayAyah,
-  preloadUpcomingVerse,
-  pauseAudio,
-  resumeAudio,
-  seekAudio,
-  stopAndUnloadAudio,
-  setAudioRate,
-  isAudioLoaded,
-} from '../services/audioService';
+import { stopAndUnloadAudio, setAudioRate } from '../services/audioService';
 import { prefetchVerseRange } from '../services/cacheService';
-import { LoopSettingsModal } from './LoopSettingsModal';
-import {
-  AyahTiming,
-  WordTiming,
-  RECITER_TIMINGS,
-  getSurahVerseTimings,
-} from '../data/reciterTimings';
+import { AyahTiming } from '../data/reciterTimings';
 import { BASE_RECITERS } from '../data/reciters';
-import {
-  getInstantTimings,
-  fetchSurahVerseTimings,
-  getAyahWordTimings,
-} from '../services/timingService';
+import { getAyahWordTimings } from '../services/timingService';
+import { resolveInstantTimeline, resolveExactTimeline, effectiveReciter } from '../services/timelineService';
+import { rescaleToDuration, segmentFor } from '../core/timeline';
+import { usePlaybackEngine } from '../hooks/usePlaybackEngine';
+import { LadderConfig, LadderProgress, describeStep } from '../services/hifzLadderService';
+import { updateCarPlayState, clearNowPlayingState, registerNowPlayingHandlers } from '../services/carPlayService';
+import { recordListenSession } from '../services/analyticsService';
+import { LoopSettingsModal } from './LoopSettingsModal';
 import { SoundwaveVisualizer } from './SoundwaveVisualizer';
 import { BouncyTouchable } from './BouncyTouchable';
 import { SegmentedPlaybackBar } from './SegmentedPlaybackBar';
 import { VocalPitchMonitor, PitchPracticeMode } from './VocalPitchMonitor';
-import {
-  updateCarPlayState,
-  clearNowPlayingState,
-  registerNowPlayingHandlers,
-} from '../services/carPlayService';
-import { recordListenSession } from '../services/analyticsService';
-import {
-  LadderConfig,
-  LadderStep,
-  buildLadderPlan,
-  reciteWindowMs,
-  saveLadderProgress,
-  describeStep,
-} from '../services/hifzLadderService';
-import { HifzLadderHud, LadderPhase } from './HifzLadderHud';
+import { HifzLadderHud } from './HifzLadderHud';
+import { HifzLadderSetupModal } from './HifzLadderSetupModal';
+import { VerseHero } from './VerseHero';
+import { ModeSheet, PlayerMode } from './ModeSheet';
+import { colors, space, radius, type, pill, shadow } from '../theme';
 
 export interface LadderSessionConfig {
   config: LadderConfig;
@@ -80,176 +48,12 @@ interface NowPlayingScreenProps {
   initialLoopSettings?: LoopSettings;
   ladder?: LadderSessionConfig | null;
   onExitLadder?: () => void;
+  onStartLadder?: (config: LadderConfig, resume: LadderProgress | null) => void;
   onMinimize: () => void;
   onPlaybackStateChange?: (state: PlaybackStateReport) => void;
 }
 
-const toArabicIndic = (num: number): string => {
-  const digits = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
-  return num
-    .toString()
-    .split('')
-    .map(d => digits[parseInt(d, 10)] || d)
-    .join('');
-};
-
-interface QuranCardViewProps {
-  currentVerse?: Verse;
-  currentVerseNum: number;
-  showBismillahHeader: boolean;
-  cardOpacity: Animated.Value;
-  cardScale: Animated.Value;
-  cardSlideX: Animated.Value;
-  auraGlow: Animated.Value;
-  currentWordIndex: number;
-  words: string[];
-  compact?: boolean;
-  /** Hifz Ladder recite step: conceal the verse so the user recalls from memory. */
-  hidden?: boolean;
-}
-
-const QuranCardView = React.memo<QuranCardViewProps>(({
-  currentVerse,
-  currentVerseNum,
-  showBismillahHeader,
-  cardOpacity,
-  cardScale,
-  cardSlideX,
-  auraGlow,
-  currentWordIndex,
-  words,
-  compact = false,
-  hidden = false,
-}) => {
-  const cardScrollRef = useRef<ScrollView>(null);
-
-  useEffect(() => {
-    cardScrollRef.current?.scrollTo({ y: 0, animated: false });
-  }, [currentVerseNum]);
-
-  if (hidden) {
-    return (
-      <View style={[styles.cardWrapper, compact && styles.cardWrapperCompact]}>
-        <Animated.View style={[styles.ambientAura, { opacity: auraGlow }]} />
-        <Animated.View
-          style={[
-            styles.quranCard,
-            styles.quranCardHidden,
-            { opacity: cardOpacity, transform: [{ scale: cardScale }, { translateX: cardSlideX }] },
-          ]}
-        >
-          <View style={styles.hiddenPlaceholderRows}>
-            {[0.9, 0.7, 0.8].map((w, i) => (
-              <View key={i} style={[styles.hiddenPlaceholderLine, { width: `${w * 100}%` }]} />
-            ))}
-          </View>
-          <View style={styles.hiddenCenter}>
-            <Ionicons name="eye-off-outline" size={22} color="#6b5424" />
-            <Text style={styles.hiddenTitle}>Recite from memory</Text>
-            <Text style={styles.hiddenHint}>Hold to peek • double-tap to hear it</Text>
-          </View>
-          <Text style={styles.hiddenAyahNum}>﴿{toArabicIndic(currentVerseNum)}﴾</Text>
-        </Animated.View>
-      </View>
-    );
-  }
-
-  return (
-    <View style={[styles.cardWrapper, compact && styles.cardWrapperCompact]}>
-      {/* Meditative Ambient Radial Aura */}
-      <Animated.View
-        style={[
-          styles.ambientAura,
-          {
-            opacity: auraGlow,
-          },
-        ]}
-      />
-
-      <Animated.View
-        style={[
-          styles.quranCard,
-          {
-            opacity: cardOpacity,
-            transform: [{ scale: cardScale }, { translateX: cardSlideX }],
-          },
-        ]}
-      >
-        <ScrollView
-          ref={cardScrollRef}
-          contentContainerStyle={[
-            styles.cardScrollContent,
-            compact && styles.cardScrollContentCompact,
-          ]}
-          showsVerticalScrollIndicator={false}
-        >
-          {/* Gilded Bismillah Banner */}
-          {showBismillahHeader && !compact && (
-            <View style={styles.bismillahBox}>
-              <Text style={styles.bismillahText}>
-                بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ
-              </Text>
-              <View style={styles.bismillahUnderline} />
-            </View>
-          )}
-
-          {/* Word-By-Word Glowing Highlighting */}
-          <Text style={[styles.arabicText, compact && styles.arabicTextCompact]}>
-            {words.length > 0 ? (
-              <>
-                {words.map((word, index) => {
-                  const isSpoken = currentWordIndex >= 0 && index < currentWordIndex;
-                  const isCurrent = currentWordIndex === index;
-                  const isUpcoming = currentWordIndex >= 0 && index > currentWordIndex;
-
-                  return (
-                    <Text
-                      key={`${index}_${word}`}
-                      style={[
-                        styles.wordBase,
-                        compact && styles.wordBaseCompact,
-                        isSpoken && styles.wordSpoken,
-                        isCurrent && styles.wordCurrent,
-                        isUpcoming && styles.wordUpcoming,
-                      ]}
-                    >
-                      {word}
-                      {index < words.length - 1 ? ' ' : ''}
-                    </Text>
-                  );
-                })}
-                <Text
-                  style={[
-                    styles.ayahEndSymbol,
-                    compact && styles.ayahEndSymbolCompact,
-                    currentWordIndex >= words.length && styles.ayahEndSymbolActive,
-                  ]}
-                >
-                  {' '}
-                  ﴿{toArabicIndic(currentVerseNum)}﴾
-                </Text>
-              </>
-            ) : (
-              <Text style={[styles.wordBase, compact && styles.wordBaseCompact]}>
-                {currentVerse?.arabicText || 'Loading verse...'}
-              </Text>
-            )}
-          </Text>
-
-          <View style={[styles.cardDivider, compact && styles.cardDividerCompact]} />
-
-          {/* English Translation */}
-          <Text
-            style={[styles.translationText, compact && styles.translationTextCompact]}
-            numberOfLines={compact ? 2 : undefined}
-          >
-            "{currentVerse?.englishText || 'Loading translation...'}"
-          </Text>
-        </ScrollView>
-      </Animated.View>
-    </View>
-  );
-});
+const DEFAULT_LOOP: LoopSettings = { mode: 'range', verseRepeatCount: 1, playbackSpeed: 1.0, delayBetweenVersesSeconds: 0 };
 
 export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
   surah,
@@ -260,2011 +64,443 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
   initialLoopSettings,
   ladder = null,
   onExitLadder,
+  onStartLadder,
   onMinimize,
   onPlaybackStateChange,
 }) => {
+  // ---------------------------------------------------------------- local UI state
   const [verses, setVerses] = useState<Verse[]>([]);
-  const [currentVerseNum, setCurrentVerseNum] = useState<number>(fromVerse);
-  const [isPlaying, setIsPlaying] = useState<boolean>(false);
-  const [durationMillis, setDurationMillis] = useState<number>(1);
-  const [currentVersePositionMillis, setCurrentVersePositionMillis] = useState<number>(0);
-  const [currentVerseDurationMillis, setCurrentVerseDurationMillis] = useState<number>(1);
-  const isUserScrubbingRef = useRef<boolean>(false);
   const [verseTimings, setVerseTimings] = useState<Record<number, AyahTiming>>({});
+  const [loopSettings, setLoopSettings] = useState<LoopSettings>(initialLoopSettings || DEFAULT_LOOP);
+  const [trackDurationMs, setTrackDurationMs] = useState(1);
+  const [reciterIndex, setReciterIndex] = useState(0);
+  const [mode, setMode] = useState<PlayerMode>(ladder ? 'ladder' : 'listen');
+  const [pitchMode, setPitchMode] = useState<PitchPracticeMode>('listen');
+  const [modeSheetVisible, setModeSheetVisible] = useState(false);
+  const [settingsVisible, setSettingsVisible] = useState(false);
+  const [ladderSetupVisible, setLadderSetupVisible] = useState(false);
+  const [reciteRemainingSec, setReciteRemainingSec] = useState<number | null>(null);
+  const [isPeeking, setIsPeeking] = useState(false);
 
   const isMultipleMode = reciter.id === 'multiple';
-  const [multipleReciterIndex, setMultipleReciterIndex] = useState<number>(0);
-  const multipleReciterIndexRef = useRef<number>(0);
+  const currentReciter = isMultipleMode ? BASE_RECITERS[reciterIndex] : reciter;
+  const isSingleFile = !!effectiveReciter(currentReciter).isSurahBased;
 
-  // Keep ref in sync
-  useEffect(() => {
-    multipleReciterIndexRef.current = multipleReciterIndex;
-  }, [multipleReciterIndex]);
+  // ---------------------------------------------------------------- engine
+  const reciteTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stopReciteCountdown = useCallback(() => {
+    if (reciteTickRef.current) clearInterval(reciteTickRef.current);
+    reciteTickRef.current = null;
+    setReciteRemainingSec(null);
+  }, []);
 
-  // Reset index when reciter prop changes
-  useEffect(() => {
-    multipleReciterIndexRef.current = 0;
-    setMultipleReciterIndex(0);
-  }, [reciter.id]);
-
-  const currentEffectiveReciter = isMultipleMode
-    ? BASE_RECITERS[multipleReciterIndex]
-    : reciter;
-
-  const isTimedReciter = !!currentEffectiveReciter.isSurahBased;
-
-  // Delightful Animation Values
-  const cardOpacity = useRef(new Animated.Value(1)).current;
-  const cardScale = useRef(new Animated.Value(1)).current;
-  const cardSlideX = useRef(new Animated.Value(0)).current;
-  const auraGlow = useRef(new Animated.Value(0.3)).current;
-
-  // Meditative ambient breathing glow loop
-  useEffect(() => {
-    const breathingLoop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(auraGlow, {
-          toValue: 0.65,
-          duration: 3200,
-          useNativeDriver: true,
-        }),
-        Animated.timing(auraGlow, {
-          toValue: 0.25,
-          duration: 3200,
-          useNativeDriver: true,
-        }),
-      ])
-    );
-    breathingLoop.start();
-    return () => breathingLoop.stop();
-  }, [auraGlow]);
-
-  // Spring transition animation when current ayah changes
-  const animateVerseChange = useCallback(() => {
-    cardOpacity.setValue(0.35);
-    cardScale.setValue(0.97);
-    cardSlideX.setValue(10);
-
-    Animated.parallel([
-      Animated.timing(cardOpacity, {
-        toValue: 1,
-        duration: 280,
-        useNativeDriver: true,
-      }),
-      Animated.spring(cardScale, {
-        toValue: 1,
-        speed: 24,
-        bounciness: 6,
-        useNativeDriver: true,
-      }),
-      Animated.spring(cardSlideX, {
-        toValue: 0,
-        speed: 24,
-        bounciness: 6,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  }, [cardOpacity, cardScale, cardSlideX]);
-
-  // Loop settings & repeat counter
-  const [loopSettings, setLoopSettings] = useState<LoopSettings>(
-    initialLoopSettings || {
-      mode: 'range',
-      verseRepeatCount: 1,
-      playbackSpeed: 1.0,
-      delayBetweenVersesSeconds: 0,
-    }
-  );
-  const [versePlayCount, setVersePlayCount] = useState<number>(1);
-  const [settingsModalVisible, setSettingsModalVisible] = useState<boolean>(false);
-
-  // Vocal Pitch Monitor state (Layout 1 Split View)
-  const [showPitchMonitor, setShowPitchMonitor] = useState<boolean>(false);
-  const [pitchMode, setPitchMode] = useState<PitchPracticeMode>('listen');
-  const [echoPass, setEchoPass] = useState<1 | 2>(1);
-
-  const [currentWordIndex, setCurrentWordIndex] = useState<number>(-1);
-  const lastWordIndexRef = useRef<number>(-1);
-  const lastManualSeekTimestampRef = useRef<number>(0);
-  const pendingSeekTargetMsRef = useRef<number | null>(null);
-  const isPlayingRef = useRef<boolean>(false);
-  const lastReportedPosRef = useRef<number>(0);
-  const lastReportedDurRef = useRef<number>(1);
-
-  const currentVerse = useMemo(
-    () => verses.find(v => v.numberInSurah === currentVerseNum),
-    [verses, currentVerseNum]
-  );
-
-  const words = useMemo(() => {
-    if (!currentVerse?.arabicText) return [];
-    return parseArabicWords(currentVerse.arabicText);
-  }, [currentVerse?.arabicText]);
-
-  const currentWordTimings = useMemo(() => {
-    if (!currentVerse || words.length === 0) return [];
-    const timing = verseTimings[currentVerse.numberInSurah];
-    const isTimed = !!currentEffectiveReciter.isSurahBased;
-    return getAyahWordTimings(
-      timing,
-      words,
-      !isTimed,
-      currentVerseDurationMillis
-    );
-  }, [
-    currentVerse,
-    words,
-    verseTimings,
-    currentEffectiveReciter.isSurahBased,
-    currentVerseDurationMillis,
-  ]);
-
-  // Refs for tracking state inside status callbacks
-  // ---- Hifz Ladder state ----
-  const ladderActive = !!ladder;
-  const ladderPlan = useMemo<LadderStep[]>(
-    () => (ladder ? buildLadderPlan(fromVerse, toVerse, ladder.config) : []),
-    [ladder, fromVerse, toVerse]
-  );
-  const [ladderStepIndex, setLadderStepIndex] = useState<number>(ladder?.resumeStepIndex ?? 0);
-  const [ladderRepsDone, setLadderRepsDone] = useState<number>(ladder?.resumeRepsDone ?? 0);
-  const [ladderPhase, setLadderPhase] = useState<LadderPhase>('listen');
-  const [reciteRemainingSec, setReciteRemainingSec] = useState<number | null>(null);
-  const [isReciteTimerPaused, setIsReciteTimerPaused] = useState<boolean>(false);
-  const [isPeeking, setIsPeeking] = useState<boolean>(false);
-  const ladderRef = useRef({
-    stepIndex: ladder?.resumeStepIndex ?? 0,
-    repsDone: ladder?.resumeRepsDone ?? 0,
-    phase: 'listen' as LadderPhase,
-    reciteTimer: null as ReturnType<typeof setTimeout> | null,
-    reciteTick: null as ReturnType<typeof setInterval> | null,
-    reciteDeadline: 0,
-    reciteRemainingMs: 0,
-    timerPaused: false,
-  });
-  const currentLadderStep: LadderStep | null =
-    ladderActive && ladderPlan.length > 0 ? ladderPlan[Math.min(ladderStepIndex, ladderPlan.length - 1)] : null;
-
-  // While a ladder runs, the loop engine works on the current step's range with simple range looping
-  const effectiveFromVerse = currentLadderStep ? currentLadderStep.fromVerse : fromVerse;
-  const effectiveToVerse = currentLadderStep ? currentLadderStep.toVerse : toVerse;
-  const effectiveLoopSettings: LoopSettings = ladderActive
-    ? { ...loopSettings, mode: 'range', verseRepeatCount: 1 }
-    : loopSettings;
-
-  // Pitch monitor is never shown during a ladder
-  useEffect(() => {
-    if (ladderActive && showPitchMonitor) setShowPitchMonitor(false);
-  }, [ladderActive, showPitchMonitor]);
-
-  const stateRef = useRef({
-    currentVerseNum,
-    fromVerse: effectiveFromVerse,
-    toVerse: effectiveToVerse,
+  const { state, dispatch, engine } = usePlaybackEngine({
     surah,
-    reciter: currentEffectiveReciter,
-    loopSettings: effectiveLoopSettings,
-    versePlayCount,
-    verses,
-    verseTimings,
-    currentWordTimings,
-    showPitchMonitor,
-    pitchMode,
-    echoPass,
-    isLoopingTransition: false,
+    reciter: currentReciter,
+    playbackSpeed: loopSettings.playbackSpeed,
+    ladderPersistKey: ladder ? { surahNumber: surah.number, fromVerse, toVerse, reciterId: reciter.id } : null,
+    onTrackDuration: ms => setTrackDurationMs(prev => (Math.abs(prev - ms) > 100 ? ms : prev)),
+    onReciteTimerArmed: ms => {
+      stopReciteCountdown();
+      const deadline = Date.now() + ms;
+      setReciteRemainingSec(Math.ceil(ms / 1000));
+      reciteTickRef.current = setInterval(() => setReciteRemainingSec(Math.max(0, Math.ceil((deadline - Date.now()) / 1000))), 250);
+    },
+    onReciteTimerCleared: stopReciteCountdown,
+    onReciteTimerFired: stopReciteCountdown,
+    onLadderExited: () => {
+      setMode('listen');
+      onExitLadder?.();
+    },
+    onNextReciter: startVerse => {
+      const nextIndex = (reciterIndex + 1) % BASE_RECITERS.length;
+      setReciterIndex(nextIndex);
+      const next = BASE_RECITERS[nextIndex];
+      const { timeline, timings } = resolveInstantTimeline(next, surah.number, verses, trackDurationMs);
+      setVerseTimings(timings);
+      dispatch({ type: 'RECITER_CHANGED', timeline, startVerse });
+      resolveExactTimeline(next, surah.number, verses).then(exact => {
+        if (exact) {
+          setVerseTimings(exact.timings);
+          dispatch({ type: 'TIMELINE', timeline: exact.timeline });
+        }
+      });
+      prefetchVerseRange(BASE_RECITERS[(nextIndex + 1) % BASE_RECITERS.length], surah.number, fromVerse, toVerse);
+    },
   });
 
-  stateRef.current = {
-    currentVerseNum,
-    fromVerse: effectiveFromVerse,
-    toVerse: effectiveToVerse,
-    surah,
-    reciter: currentEffectiveReciter,
-    loopSettings: effectiveLoopSettings,
-    versePlayCount,
-    verses,
-    verseTimings,
-    currentWordTimings,
-    showPitchMonitor,
-    pitchMode,
-    echoPass,
-    isLoopingTransition: stateRef.current.isLoopingTransition,
-  };
-
-  // 1. Initial Verse Loading and Range Background Pre-Caching
+  // ---------------------------------------------------------------- session load
+  const ladderRef = useRef(ladder);
   useEffect(() => {
-    let isMounted = true;
+    ladderRef.current = ladder;
+  }, [ladder]);
+  useEffect(() => {
+    let mounted = true;
     (async () => {
       const rec = isMultipleMode ? BASE_RECITERS[0] : reciter;
+      setReciterIndex(0);
       prefetchVerseRange(rec, surah.number, fromVerse, toVerse);
-      if (isMultipleMode && BASE_RECITERS.length > 1) {
-        prefetchVerseRange(BASE_RECITERS[1], surah.number, fromVerse, toVerse);
-      }
-
       const loaded = await getVersesForSurah(surah.number);
-      if (!isMounted) return;
+      if (!mounted) return;
+      setVerses(loaded);
 
-      let exactTimings: Record<number, AyahTiming> | null = null;
-      if (rec.quranComId) {
-        try {
-          exactTimings = await fetchSurahVerseTimings(
-            rec,
-            surah.number,
-            loaded,
-            durationMillis
-          );
-        } catch (e) {}
-      }
+      const { timeline, timings } = resolveInstantTimeline(rec, surah.number, loaded, 1);
+      setVerseTimings(timings);
+      const l = ladderRef.current;
+      dispatch({
+        type: 'LOAD',
+        config: {
+          fromVerse,
+          toVerse,
+          mode: loopSettings.mode,
+          verseRepeatCount: loopSettings.verseRepeatCount,
+          delayBetweenVersesMs: loopSettings.delayBetweenVersesSeconds * 1000,
+          cycleReciters: isMultipleMode,
+          echo: false,
+        },
+        timeline,
+        ladder: l ? { config: l.config, stepIndex: l.resumeStepIndex, repsDone: l.resumeRepsDone } : null,
+      });
+      recordListenSession(surah, fromVerse, toVerse, rec).catch(() => {});
 
-      const initialTimings =
-        exactTimings && Object.keys(exactTimings).length > 0
-          ? exactTimings
-          : getInstantTimings(
-              rec,
-              surah.number,
-              loaded,
-              durationMillis > 1000 ? durationMillis : 180000
-            );
-
-      if (isMounted) {
-        setVerseTimings(initialTimings);
-        stateRef.current.verseTimings = initialTimings;
-        setVerses(loaded);
+      const exact = await resolveExactTimeline(rec, surah.number, loaded);
+      if (mounted && exact) {
+        setVerseTimings(exact.timings);
+        dispatch({ type: 'TIMELINE', timeline: exact.timeline });
       }
     })();
-
     return () => {
-      isMounted = false;
+      mounted = false;
       stopAndUnloadAudio();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [surah.number, reciter.id, fromVerse, toVerse, sessionId]);
 
-  // Re-calculate precise verse timings whenever audio duration is loaded
-  const updateTimingsWithDuration = useCallback(
-    (totalDurMs: number) => {
-      const rec = isMultipleMode ? BASE_RECITERS[multipleReciterIndexRef.current] : reciter;
-      if (totalDurMs > 1000 && verses.length > 0) {
-        if (!rec.quranComId && !RECITER_TIMINGS[rec.id]?.[surah.number]) {
-          const timings = getSurahVerseTimings(
-            rec.id,
-            surah.number,
-            verses,
-            totalDurMs
-          );
-          setVerseTimings(timings);
-          stateRef.current.verseTimings = timings;
-        }
-      }
-    },
-    [reciter.id, isMultipleMode, surah.number, verses]
-  );
-
-  // Determine upcoming ayah for discrete reciters
-  const getUpcomingAyah = (currentAyah: number, currentIteration: number) => {
-    if (currentIteration < loopSettings.verseRepeatCount) {
-      return currentAyah;
-    }
-    if (loopSettings.mode === 'single') {
-      return currentAyah;
-    }
-    if (currentAyah < toVerse) {
-      return currentAyah + 1;
-    }
-    if (loopSettings.mode === 'range') {
-      return fromVerse;
-    }
-    return null;
-  };
-
-  // Preload adjacent verses in background for 0ms Next/Prev skip
-  const preloadAdjacentVerses = useCallback(
-    (ayahNum: number, iteration: number, activeRec: Reciter) => {
-      if (activeRec.isSurahBased) return;
-      const upcoming = getUpcomingAyah(ayahNum, iteration);
-      if (upcoming !== null && upcoming !== ayahNum) {
-        preloadUpcomingVerse(surah.number, upcoming, activeRec, loopSettings.playbackSpeed);
-      }
-      if (ayahNum + 1 <= toVerse && ayahNum + 1 !== upcoming) {
-        preloadUpcomingVerse(surah.number, ayahNum + 1, activeRec, loopSettings.playbackSpeed);
-      }
-      if (ayahNum > fromVerse) {
-        preloadUpcomingVerse(surah.number, ayahNum - 1, activeRec, loopSettings.playbackSpeed);
-      }
-    },
-    [surah.number, fromVerse, toVerse, loopSettings.playbackSpeed, loopSettings.mode, loopSettings.verseRepeatCount]
-  );
-
-  // Synchronously reset playhead & duration when transitioning or seeking to an ayah
-  const resetPlayheadForAyah = useCallback(
-    (targetAyah: number, timingsMap: Record<number, AyahTiming>, seekOffsetMs: number = 0) => {
-      stateRef.current.currentVerseNum = targetAyah;
-      lastManualSeekTimestampRef.current = Date.now();
-      lastReportedPosRef.current = seekOffsetMs;
-      lastWordIndexRef.current = -1;
-      setCurrentVerseNum(targetAyah);
-      setCurrentVersePositionMillis(seekOffsetMs);
-      setCurrentWordIndex(-1);
-
-      const t = timingsMap[targetAyah];
-      if (t) {
-        const dur = Math.max(1, t.endMs - t.startMs);
-        lastReportedDurRef.current = dur;
-        setCurrentVerseDurationMillis(dur);
-        pendingSeekTargetMsRef.current = t.startMs + seekOffsetMs;
-      } else {
-        pendingSeekTargetMsRef.current = seekOffsetMs;
-      }
-    },
-    []
-  );
-
-  // 2. Playback logic
-  const playVerse = useCallback(
-    async (ayahNum: number, iteration: number = 1, reciterOverride?: Reciter) => {
-      const activeRec =
-        reciterOverride ||
-        (isMultipleMode ? BASE_RECITERS[multipleReciterIndexRef.current] : reciter);
-      const isTimed = !!activeRec.isSurahBased;
-
-      let timing = stateRef.current.verseTimings[ayahNum];
-      if (!timing) {
-        const instant = getInstantTimings(activeRec, surah.number, verses, durationMillis);
-        timing = instant[ayahNum];
-      }
-
-      stateRef.current.currentVerseNum = ayahNum;
-      lastManualSeekTimestampRef.current = Date.now();
-      lastReportedPosRef.current = 0;
-      lastWordIndexRef.current = -1;
-
-      setCurrentVerseNum(ayahNum);
-      setVersePlayCount(iteration);
-      setCurrentVersePositionMillis(0);
-      setCurrentWordIndex(-1);
-      if (timing) {
-        const dur = Math.max(1, timing.endMs - timing.startMs);
-        lastReportedDurRef.current = dur;
-        setCurrentVerseDurationMillis(dur);
-      }
-      animateVerseChange();
-
-      // Immediately start preloading adjacent verses in parallel!
-      preloadAdjacentVerses(ayahNum, iteration, activeRec);
-
-      if (isTimed) {
-        const startSeekMs = timing?.startMs || 0;
-        pendingSeekTargetMsRef.current = startSeekMs;
-
-        const sound = await loadAndPlayAyah(
-          surah.number,
-          1,
-          activeRec,
-          loopSettings.playbackSpeed,
-          async status => {
-            if (status.isPlaying !== isPlayingRef.current) {
-              isPlayingRef.current = status.isPlaying;
-              setIsPlaying(status.isPlaying);
-            }
-
-            if (status.durationMillis && Math.abs(status.durationMillis - durationMillis) > 100) {
-              setDurationMillis(status.durationMillis);
-              updateTimingsWithDuration(status.durationMillis);
-            }
-
-            if (!status.isPlaying || stateRef.current.isLoopingTransition) return;
-
-            const pos = status.positionMillis;
-
-            // Ignore stale pre-seek playback ticks emitted before the native/web player finishes seeking
-            if (pendingSeekTargetMsRef.current !== null) {
-              const elapsedSinceSeek = Date.now() - lastManualSeekTimestampRef.current;
-              if (elapsedSinceSeek < 650 && Math.abs(pos - pendingSeekTargetMsRef.current) > 450) {
-                return;
-              }
-              pendingSeekTargetMsRef.current = null;
-            }
-
-            const {
-              currentVerseNum: curr,
-              fromVerse: from,
-              toVerse: to,
-              loopSettings: settings,
-              verseTimings: timings,
-            } = stateRef.current;
-
-            const isEchoActive =
-              stateRef.current.showPitchMonitor && stateRef.current.pitchMode === 'echo';
-            const isHoldingSingleAyah =
-              isEchoActive || settings.verseRepeatCount > 1 || settings.mode === 'single';
-
-            // 1. Contiguous boundary check FIRST so `activeCurr` is updated BEFORE computing playhead progress!
-            let activeCurr = curr;
-            if (!isHoldingSingleAyah && Date.now() - lastManualSeekTimestampRef.current > 450) {
-              for (let a = from; a <= to; a++) {
-                const t = timings[a];
-                if (t && pos >= t.startMs && pos < t.endMs) {
-                  if (activeCurr !== a) {
-                    activeCurr = a;
-                    stateRef.current.currentVerseNum = a;
-                    setCurrentVerseNum(a);
-                    lastWordIndexRef.current = -1;
-                    setCurrentWordIndex(-1);
-                    const newDur = Math.max(1, t.endMs - t.startMs);
-                    const newPos = Math.max(0, Math.min(newDur, pos - t.startMs));
-                    lastReportedPosRef.current = newPos;
-                    lastReportedDurRef.current = newDur;
-                    setCurrentVersePositionMillis(newPos);
-                    setCurrentVerseDurationMillis(newDur);
-                    animateVerseChange();
-                    Haptics.selectionAsync().catch(() => {});
-                  }
-                  break;
-                }
-              }
-            }
-
-            // 2. Update scrubber position within active verse (`activeCurr`)
-            if (!isUserScrubbingRef.current) {
-              const currentTiming = timings[activeCurr];
-              if (currentTiming) {
-                const ayahDur = Math.max(1, currentTiming.endMs - currentTiming.startMs);
-                const ayahPos = Math.max(0, Math.min(ayahDur, pos - currentTiming.startMs));
-                const minDelta = stateRef.current.showPitchMonitor ? 45 : 100;
-                if (
-                  Math.abs(ayahPos - lastReportedPosRef.current) >= minDelta ||
-                  ayahPos === 0 ||
-                  ayahPos >= ayahDur - 80
-                ) {
-                  lastReportedPosRef.current = ayahPos;
-                  setCurrentVersePositionMillis(ayahPos);
-                }
-                if (Math.abs(ayahDur - lastReportedDurRef.current) > 30) {
-                  lastReportedDurRef.current = ayahDur;
-                  setCurrentVerseDurationMillis(ayahDur);
-                }
-              }
-            }
-
-            // 3. Word-by-word active highlight tracking
-            const wordTimings = stateRef.current.currentWordTimings;
-            if (wordTimings && wordTimings.length > 0) {
-              let activeWord = -1;
-              for (let w = 0; w < wordTimings.length; w++) {
-                if (pos >= wordTimings[w].startMs && pos < wordTimings[w].endMs) {
-                  activeWord = w;
-                  break;
-                }
-              }
-              if (activeWord === -1 && pos >= wordTimings[wordTimings.length - 1].endMs) {
-                activeWord = wordTimings.length;
-              }
-              if (activeWord !== lastWordIndexRef.current) {
-                lastWordIndexRef.current = activeWord;
-                setCurrentWordIndex(activeWord);
-              }
-            }
-
-            // 4. Boundary checking for loops (and Auto-Echo pass alternation):
-            if (isHoldingSingleAyah) {
-              const currentTiming = timings[activeCurr];
-              if (currentTiming && pos >= currentTiming.endMs - 120) {
-                handleTimedVerseFinished();
-              }
-            } else if (settings.mode === 'range') {
-              const rangeEndTiming = timings[to];
-              if (rangeEndTiming && pos >= rangeEndTiming.endMs - 120) {
-                handleTimedVerseFinished();
-              }
-            } else if (settings.mode === 'off') {
-              const rangeEndTiming = timings[to];
-              if (rangeEndTiming && pos >= rangeEndTiming.endMs - 120) {
-                pauseAudio();
-                isPlayingRef.current = false;
-                setIsPlaying(false);
-              }
-            } else if (status.didJustFinish) {
-              isPlayingRef.current = false;
-              setIsPlaying(false);
-            }
-          },
-          startSeekMs
-        );
-
-        if (sound) {
-          isPlayingRef.current = true;
-          setIsPlaying(true);
-        }
-      } else {
-        pendingSeekTargetMsRef.current = 0;
-
-        const sound = await loadAndPlayAyah(
-          surah.number,
-          ayahNum,
-          activeRec,
-          loopSettings.playbackSpeed,
-          status => {
-            if (status.isPlaying !== isPlayingRef.current) {
-              isPlayingRef.current = status.isPlaying;
-              setIsPlaying(status.isPlaying);
-            }
-
-            if (status.didJustFinish) {
-              handleDiscreteVerseFinished();
-              return;
-            }
-
-            const pos = status.positionMillis || 0;
-            if (pendingSeekTargetMsRef.current !== null) {
-              const elapsedSinceSeek = Date.now() - lastManualSeekTimestampRef.current;
-              if (elapsedSinceSeek < 500 && Math.abs(pos - pendingSeekTargetMsRef.current) > 450) {
-                return;
-              }
-              pendingSeekTargetMsRef.current = null;
-            }
-
-            if (!isUserScrubbingRef.current) {
-              const dur = status.durationMillis || 1;
-              const minDelta = stateRef.current.showPitchMonitor ? 45 : 100;
-              if (
-                Math.abs(pos - lastReportedPosRef.current) >= minDelta ||
-                pos === 0 ||
-                pos >= dur - 80
-              ) {
-                lastReportedPosRef.current = pos;
-                setCurrentVersePositionMillis(pos);
-              }
-              if (status.durationMillis && status.durationMillis > 0 && Math.abs(status.durationMillis - lastReportedDurRef.current) > 30) {
-                lastReportedDurRef.current = status.durationMillis;
-                setCurrentVerseDurationMillis(status.durationMillis);
-              }
-            }
-
-            // Word-by-word active highlight tracking for discrete reciters
-            const dPos = status.positionMillis || 0;
-            const wordTimings = stateRef.current.currentWordTimings;
-            if (wordTimings && wordTimings.length > 0) {
-              let activeWord = -1;
-              for (let w = 0; w < wordTimings.length; w++) {
-                if (dPos >= wordTimings[w].startMs && dPos < wordTimings[w].endMs) {
-                  activeWord = w;
-                  break;
-                }
-              }
-              if (activeWord === -1 && dPos >= wordTimings[wordTimings.length - 1].endMs) {
-                activeWord = wordTimings.length;
-              }
-              if (activeWord !== lastWordIndexRef.current) {
-                lastWordIndexRef.current = activeWord;
-                setCurrentWordIndex(activeWord);
-              }
-            }
-          },
-          0
-        );
-
-        if (sound) {
-          isPlayingRef.current = true;
-          setIsPlaying(true);
-        }
-      }
-    },
-    [
-      surah.number,
-      reciter,
-      isMultipleMode,
-      loopSettings.playbackSpeed,
-      loopSettings.mode,
-      loopSettings.verseRepeatCount,
-      durationMillis,
-      updateTimingsWithDuration,
-      animateVerseChange,
-      preloadAdjacentVerses,
-      verses,
-    ]
-  );
-
-  // Auto-play when verses and timings are loaded for this session
-  const lastSessionKeyRef = useRef<string>('');
-
-  // =====================================================================================
-  // Hifz Ladder engine: drives listen / recite steps on top of the range-loop engine
-  // =====================================================================================
-  const clearReciteTimers = useCallback(() => {
-    const L = ladderRef.current;
-    if (L.reciteTimer) clearTimeout(L.reciteTimer);
-    if (L.reciteTick) clearInterval(L.reciteTick);
-    L.reciteTimer = null;
-    L.reciteTick = null;
-  }, []);
-
-  const persistLadder = useCallback(
-    (completed: boolean = false) => {
-      if (!ladder) return;
-      const L = ladderRef.current;
-      saveLadderProgress({
-        surahNumber: surah.number,
-        fromVerse,
-        toVerse,
-        reciterId: reciter.id,
-        config: ladder.config,
-        stepIndex: L.stepIndex,
-        repsDone: L.repsDone,
-        completed,
-      });
-    },
-    [ladder, surah.number, fromVerse, toVerse, reciter.id]
-  );
-
-  const setLadderPhaseBoth = useCallback((phase: LadderPhase) => {
-    ladderRef.current.phase = phase;
-    setLadderPhase(phase);
-  }, []);
-
-  // Forward declarations wired below (functions reference each other)
-  const ladderFnsRef = useRef({
-    startStep: (_index: number, _repsDone?: number) => {},
-    advanceStep: () => {},
-    completeReciteRep: () => {},
-  });
-
-  const armReciteTimer = useCallback(
-    (durationMs: number) => {
-      clearReciteTimers();
-      const L = ladderRef.current;
-      L.reciteRemainingMs = durationMs;
-      L.reciteDeadline = Date.now() + durationMs;
-      L.timerPaused = false;
-      setIsReciteTimerPaused(false);
-      setReciteRemainingSec(Math.ceil(durationMs / 1000));
-      L.reciteTimer = setTimeout(() => ladderFnsRef.current.completeReciteRep(), durationMs);
-      L.reciteTick = setInterval(() => {
-        const rem = Math.max(0, ladderRef.current.reciteDeadline - Date.now());
-        setReciteRemainingSec(Math.ceil(rem / 1000));
-      }, 250);
-    },
-    [clearReciteTimers]
-  );
-
-  const beginReciteRep = useCallback(() => {
-    if (!ladder) return;
-    const step = ladderPlan[ladderRef.current.stepIndex];
-    if (!step) return;
-    if (ladder.config.reciteTiming === 'auto') {
-      armReciteTimer(reciteWindowMs(step, stateRef.current.verseTimings));
-    } else {
-      clearReciteTimers();
-      setReciteRemainingSec(null);
-    }
-  }, [ladder, ladderPlan, armReciteTimer, clearReciteTimers]);
-
-  const startStep = useCallback(
-    (index: number, repsDone: number = 0) => {
-      if (!ladder || ladderPlan.length === 0) return;
-      const L = ladderRef.current;
-      clearReciteTimers();
-      const clamped = Math.max(0, Math.min(ladderPlan.length - 1, index));
-      const step = ladderPlan[clamped];
-      L.stepIndex = clamped;
-      L.repsDone = Math.max(0, Math.min(step.reps - 1, repsDone));
-      setLadderStepIndex(clamped);
-      setLadderRepsDone(L.repsDone);
-      setIsPeeking(false);
-
-      // Point the loop engine at this step's range immediately (before React re-renders)
-      stateRef.current.fromVerse = step.fromVerse;
-      stateRef.current.toVerse = step.toVerse;
-      stateRef.current.loopSettings = { ...stateRef.current.loopSettings, mode: 'range', verseRepeatCount: 1 };
-      stateRef.current.isLoopingTransition = false;
-
-      if (step.kind === 'listen') {
-        setLadderPhaseBoth('listen');
-        setReciteRemainingSec(null);
-        playVerse(step.fromVerse, 1);
-      } else {
-        setLadderPhaseBoth('recite');
-        pauseAudio();
-        isPlayingRef.current = false;
-        setIsPlaying(false);
-        stateRef.current.currentVerseNum = step.fromVerse;
-        setCurrentVerseNum(step.fromVerse);
-        lastWordIndexRef.current = -1;
-        setCurrentWordIndex(-1);
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
-        beginReciteRep();
-      }
-      persistLadder(false);
-    },
-    [ladder, ladderPlan, clearReciteTimers, setLadderPhaseBoth, playVerse, beginReciteRep, persistLadder]
-  );
-
-  const advanceStep = useCallback(() => {
-    if (!ladder) return;
-    const L = ladderRef.current;
-    if (L.stepIndex + 1 >= ladderPlan.length) {
-      clearReciteTimers();
-      setLadderPhaseBoth('complete');
-      pauseAudio();
-      isPlayingRef.current = false;
-      setIsPlaying(false);
-      setReciteRemainingSec(null);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-      persistLadder(true);
-      return;
-    }
-    startStep(L.stepIndex + 1, 0);
-  }, [ladder, ladderPlan.length, clearReciteTimers, setLadderPhaseBoth, persistLadder, startStep]);
-
-  const completeReciteRep = useCallback(() => {
-    const L = ladderRef.current;
-    if (L.phase !== 'recite') return;
-    const step = ladderPlan[L.stepIndex];
-    if (!step) return;
-    L.repsDone += 1;
-    setLadderRepsDone(L.repsDone);
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-    if (L.repsDone >= step.reps) {
-      advanceStep();
-    } else {
-      persistLadder(false);
-      beginReciteRep();
-    }
-  }, [ladderPlan, advanceStep, persistLadder, beginReciteRep]);
-
-  ladderFnsRef.current = { startStep, advanceStep, completeReciteRep };
-
-  /**
-   * Called by the loop engine when a full pass over the active range has finished.
-   * Returns true when the ladder took over (started a new step / returned to reciting),
-   * false when the engine should simply loop back to the start of the range.
-   */
-  const ladderOnCycleComplete = (): boolean => {
-    if (!ladderActive) return false;
-    const L = ladderRef.current;
-    const step = ladderPlan[L.stepIndex];
-    if (!step) return false;
-
-    if (L.phase === 'preview') {
-      // "Hear it again" finished: back to reciting the same rep
-      stateRef.current.isLoopingTransition = false;
-      pauseAudio();
-      isPlayingRef.current = false;
-      setIsPlaying(false);
-      stateRef.current.currentVerseNum = step.fromVerse;
-      setCurrentVerseNum(step.fromVerse);
-      setLadderPhaseBoth('recite');
-      beginReciteRep();
-      return true;
-    }
-
-    if (L.phase !== 'listen') return false;
-    L.repsDone += 1;
-    setLadderRepsDone(L.repsDone);
-    if (L.repsDone < step.reps) {
-      persistLadder(false);
-      return false; // keep looping this range
-    }
-    stateRef.current.isLoopingTransition = false;
-    advanceStep();
-    return true;
-  };
-
-  const handleLadderHearAgain = useCallback(() => {
-    const L = ladderRef.current;
-    if (L.phase !== 'recite') return;
-    const step = ladderPlan[L.stepIndex];
-    if (!step) return;
-    clearReciteTimers();
-    setReciteRemainingSec(null);
-    setLadderPhaseBoth('preview');
-    playVerse(step.fromVerse, 1);
-  }, [ladderPlan, clearReciteTimers, setLadderPhaseBoth, playVerse]);
-
-  const handleLadderToggleTimer = useCallback(() => {
-    const L = ladderRef.current;
-    if (L.phase !== 'recite' || ladder?.config.reciteTiming !== 'auto') return;
-    if (L.timerPaused) {
-      armReciteTimer(Math.max(1000, L.reciteRemainingMs));
-    } else {
-      L.reciteRemainingMs = Math.max(0, L.reciteDeadline - Date.now());
-      clearReciteTimers();
-      L.timerPaused = true;
-      setIsReciteTimerPaused(true);
-    }
-  }, [ladder, armReciteTimer, clearReciteTimers]);
-
-  const handleLadderPrevStep = useCallback(() => {
-    const L = ladderRef.current;
-    if (L.phase === 'complete') {
-      startStep(ladderPlan.length - 1, 0);
-      return;
-    }
-    startStep(Math.max(0, L.stepIndex - 1), 0);
-  }, [startStep, ladderPlan.length]);
-
-  const handleLadderNextStep = useCallback(() => {
-    const L = ladderRef.current;
-    if (L.phase === 'complete') return;
-    if (L.stepIndex + 1 >= ladderPlan.length) {
-      advanceStep();
-    } else {
-      startStep(L.stepIndex + 1, 0);
-    }
-  }, [startStep, advanceStep, ladderPlan.length]);
-
-  const handleLadderRestart = useCallback(() => {
-    startStep(0, 0);
-  }, [startStep]);
-
-  const handleLadderExit = useCallback(() => {
-    clearReciteTimers();
-    persistLadder(ladderRef.current.phase === 'complete');
-    onExitLadder?.();
-  }, [clearReciteTimers, persistLadder, onExitLadder]);
-
-  // Double-tap on the hidden card = hear it again
-  const lastCardTapRef = useRef<number>(0);
-  const handleHiddenCardTap = useCallback(() => {
-    const now = Date.now();
-    if (now - lastCardTapRef.current < 320) {
-      lastCardTapRef.current = 0;
-      handleLadderHearAgain();
-    } else {
-      lastCardTapRef.current = now;
-    }
-  }, [handleLadderHearAgain]);
-
-  useEffect(() => () => clearReciteTimers(), [clearReciteTimers]);
-
-  // Auto-play when verses and timings are loaded for this session
+  // Estimated timelines are rescaled once the real recording length is known
   useEffect(() => {
-    const sessionKey = `${surah.number}_${fromVerse}_${toVerse}_${reciter.id}_${sessionId || 0}_${ladder ? 'ladder' : 'play'}`;
-    if (verses.length > 0 && lastSessionKeyRef.current !== sessionKey) {
-      lastSessionKeyRef.current = sessionKey;
-      if (ladder) {
-        startStep(ladder.resumeStepIndex ?? 0, ladder.resumeRepsDone ?? 0);
-      } else {
-        playVerse(fromVerse, 1);
-      }
-      recordListenSession(surah, fromVerse, toVerse, currentEffectiveReciter).catch(() => {});
+    const t = engine.getState().timeline;
+    if (t && t.source === 'estimated' && trackDurationMs > 1000) {
+      const scaled = rescaleToDuration(t, trackDurationMs);
+      if (scaled !== t) dispatch({ type: 'TIMELINE', timeline: scaled });
     }
-  }, [verses, fromVerse, toVerse, surah.number, reciter.id, sessionId, playVerse, currentEffectiveReciter, ladder, startStep]);
+  }, [trackDurationMs, engine, dispatch]);
 
-  // Advance to next reciter when a loop cycle completes in Multiple Reciters mode
-  const advanceToNextReciterAndLoop = async (targetAyah: number) => {
-    stateRef.current.isLoopingTransition = true;
-    const nextIndex = (multipleReciterIndexRef.current + 1) % BASE_RECITERS.length;
-    multipleReciterIndexRef.current = nextIndex;
-    setMultipleReciterIndex(nextIndex);
-
-    const nextReciter = BASE_RECITERS[nextIndex];
-    stateRef.current.reciter = nextReciter;
-
-    // 1. Prepare timings for next reciter
-    const nextTimings = getInstantTimings(
-      nextReciter,
-      surah.number,
-      verses,
-      durationMillis > 1000 ? durationMillis : 180000
-    );
-    setVerseTimings(nextTimings);
-    stateRef.current.verseTimings = nextTimings;
-
-    if (nextReciter.quranComId) {
-      fetchSurahVerseTimings(nextReciter, surah.number, verses).then(exact => {
-        if (exact && Object.keys(exact).length > 0) {
-          setVerseTimings(exact);
-          stateRef.current.verseTimings = exact;
-        }
-      }).catch(() => {});
-    }
-
-    // 2. Play starting verse with next reciter
-    await playVerse(targetAyah, 1, nextReciter);
-    stateRef.current.isLoopingTransition = false;
-
-    // 3. Pre-fetch upcoming reciter after that
-    const afterNextIdx = (nextIndex + 1) % BASE_RECITERS.length;
-    prefetchVerseRange(BASE_RECITERS[afterNextIdx], surah.number, fromVerse, toVerse);
-  };
-
-  // 3. Handle completion for TIMED continuous reciters
-  const handleTimedVerseFinished = async () => {
-    if (stateRef.current.isLoopingTransition) return;
-    stateRef.current.isLoopingTransition = true;
-
-    const {
-      currentVerseNum: curr,
-      fromVerse: from,
-      toVerse: to,
-      loopSettings: settings,
-      versePlayCount: count,
-      verseTimings: timings,
-    } = stateRef.current;
-
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-
-    if (settings.delayBetweenVersesSeconds > 0) {
-      await pauseAudio();
-      await new Promise(res =>
-        setTimeout(res, settings.delayBetweenVersesSeconds * 1000)
-      );
-    }
-
-    // Auto-Echo mode alternation: Pass 1 (Listen to Reciter) -> Pass 2 (Your Mic Turn on same verse)
-    if (stateRef.current.showPitchMonitor && stateRef.current.pitchMode === 'echo') {
-      if (stateRef.current.echoPass === 1) {
-        stateRef.current.echoPass = 2;
-        setEchoPass(2);
-        resetPlayheadForAyah(curr, timings, 0);
-        const timing = timings[curr];
-        if (timing) await seekAudio(timing.startMs);
-        await resumeAudio();
-        stateRef.current.isLoopingTransition = false;
-        return;
-      } else {
-        stateRef.current.echoPass = 1;
-        setEchoPass(1);
-      }
-    }
-
-    if (count < settings.verseRepeatCount) {
-      setVersePlayCount(count + 1);
-      resetPlayheadForAyah(curr, timings, 0);
-      const timing = timings[curr];
-      if (timing) await seekAudio(timing.startMs);
-      await resumeAudio();
-      stateRef.current.isLoopingTransition = false;
-      return;
-    }
-
-    // Individual repeat count satisfied for this verse
-    setVersePlayCount(1);
-
-    if (settings.mode === 'single') {
-      if (isMultipleMode) {
-        await advanceToNextReciterAndLoop(curr);
-      } else {
-        resetPlayheadForAyah(curr, timings, 0);
-        const timing = timings[curr];
-        if (timing) await seekAudio(timing.startMs);
-        await resumeAudio();
-        stateRef.current.isLoopingTransition = false;
-      }
-    } else if (settings.mode === 'range') {
-      if (curr >= to) {
-        if (ladderOnCycleComplete()) return;
-        if (isMultipleMode) {
-          await advanceToNextReciterAndLoop(from);
-        } else {
-          resetPlayheadForAyah(from, timings, 0);
-          animateVerseChange();
-          const timing = timings[from];
-          if (timing) await seekAudio(timing.startMs);
-          await resumeAudio();
-          stateRef.current.isLoopingTransition = false;
-        }
-      } else {
-        const nextAyah = curr + 1;
-        resetPlayheadForAyah(nextAyah, timings, 0);
-        animateVerseChange();
-        const timing = timings[nextAyah];
-        if (timing) await seekAudio(timing.startMs);
-        await resumeAudio();
-        stateRef.current.isLoopingTransition = false;
-      }
-    } else {
-      await pauseAudio();
-      setIsPlaying(false);
-      stateRef.current.isLoopingTransition = false;
-    }
-  };
-
-  // 4. Handle completion for DISCRETE verse-by-verse reciters
-  const handleDiscreteVerseFinished = async () => {
-    const {
-      currentVerseNum: curr,
-      fromVerse: from,
-      toVerse: to,
-      loopSettings: settings,
-      versePlayCount: count,
-    } = stateRef.current;
-
-    if (settings.delayBetweenVersesSeconds > 0) {
-      await new Promise(res =>
-        setTimeout(res, settings.delayBetweenVersesSeconds * 1000)
-      );
-    }
-
-    // Auto-Echo mode alternation for discrete reciters: Pass 1 -> Pass 2 on same verse
-    if (stateRef.current.showPitchMonitor && stateRef.current.pitchMode === 'echo') {
-      if (stateRef.current.echoPass === 1) {
-        stateRef.current.echoPass = 2;
-        setEchoPass(2);
-        playVerse(curr, count);
-        return;
-      } else {
-        stateRef.current.echoPass = 1;
-        setEchoPass(1);
-      }
-    }
-
-    if (count < settings.verseRepeatCount) {
-      playVerse(curr, count + 1);
-      return;
-    }
-
-    // Individual repeat satisfied
-    setVersePlayCount(1);
-
-    if (settings.mode === 'single') {
-      if (isMultipleMode) {
-        await advanceToNextReciterAndLoop(curr);
-      } else {
-        playVerse(curr, 1);
-      }
-    } else if (settings.mode === 'range') {
-      if (curr < to) {
-        playVerse(curr + 1, 1);
-      } else {
-        if (ladderOnCycleComplete()) return;
-        if (isMultipleMode) {
-          await advanceToNextReciterAndLoop(from);
-        } else {
-          playVerse(from, 1);
-        }
-      }
-    } else {
-      if (curr < to) {
-        playVerse(curr + 1, 1);
-      } else {
-        if (isMultipleMode) {
-          await advanceToNextReciterAndLoop(from);
-        } else {
-          playVerse(from, 1);
-        }
-      }
-    }
-  };
-
-  const handleTogglePlayPause = useCallback(() => {
-    if (isPlayingRef.current) {
-      isPlayingRef.current = false;
-      setIsPlaying(false);
-      pauseAudio();
-    } else {
-      isPlayingRef.current = true;
-      setIsPlaying(true);
-      resumeAudio().then(resumed => {
-        if (!resumed) {
-          playVerse(stateRef.current.currentVerseNum, 1);
-        }
-      });
-    }
-  }, [playVerse]);
-
-  const handleExternalPause = useCallback(() => {
-    if (!isPlayingRef.current) return;
-    isPlayingRef.current = false;
-    setIsPlaying(false);
-    pauseAudio();
-  }, []);
-
-  const handleExternalPlay = useCallback(() => {
-    if (isPlayingRef.current) return;
-    isPlayingRef.current = true;
-    setIsPlaying(true);
-    resumeAudio().then(resumed => {
-      if (!resumed) {
-        playVerse(stateRef.current.currentVerseNum, 1);
-      }
+  // Loop settings → engine config + playback rate
+  useEffect(() => {
+    dispatch({
+      type: 'SET_CONFIG',
+      config: {
+        mode: loopSettings.mode,
+        verseRepeatCount: loopSettings.verseRepeatCount,
+        delayBetweenVersesMs: loopSettings.delayBetweenVersesSeconds * 1000,
+        echo: mode === 'pitch' && pitchMode === 'echo',
+      },
     });
-  }, [playVerse]);
+    setAudioRate(loopSettings.playbackSpeed);
+  }, [loopSettings, mode, pitchMode, dispatch]);
 
-  // Sync metadata + playhead to Dynamic Island / Lock Screen / CarPlay Now Playing and parent mini-player
+  useEffect(() => () => clearNowPlayingState(), []);
+
+  // ---------------------------------------------------------------- derived
+  const currentVerse = useMemo(() => verses.find(v => v.numberInSurah === state.verse), [verses, state.verse]);
+  const words = useMemo(() => (currentVerse ? parseArabicWords(currentVerse.arabicText) : []), [currentVerse]);
+  const wordTimings = useMemo(
+    () => (currentVerse ? getAyahWordTimings(verseTimings[state.verse], words, !isSingleFile, state.durationMs) : []),
+    [currentVerse, verseTimings, state.verse, words, isSingleFile, state.durationMs]
+  );
+  const seg = segmentFor(state.timeline, state.verse);
+  const absolutePosMs = isSingleFile ? (seg?.startMs ?? 0) + state.positionMs : state.positionMs;
+  const activeWordIndex = useMemo(() => {
+    if (wordTimings.length === 0 || !state.isPlaying && state.positionMs === 0) return -1;
+    for (let i = 0; i < wordTimings.length; i++) {
+      if (absolutePosMs >= wordTimings[i].startMs && absolutePosMs < wordTimings[i].endMs) return i;
+    }
+    return absolutePosMs >= wordTimings[wordTimings.length - 1].endMs ? wordTimings.length : -1;
+  }, [wordTimings, absolutePosMs, state.isPlaying, state.positionMs]);
+
+  const ladderState = state.ladder;
+  const ladderActive = !!ladderState;
+  const isReciting = ladderState?.phase === 'recite';
+  const showPitch = mode === 'pitch' && !ladderActive;
+  const showBismillah = surah.number !== 1 && surah.number !== 9 && state.verse === 1;
+
+  // ---------------------------------------------------------------- Now Playing / mini-player
   useEffect(() => {
+    const step = ladderState ? ladderState.plan[ladderState.stepIndex] : null;
     updateCarPlayState({
       currentSurah: surah,
-      currentVerseNum,
+      currentVerseNum: state.verse,
       fromVerse,
       toVerse,
-      reciter: currentEffectiveReciter,
-      isPlaying,
-      positionMillis: currentVersePositionMillis,
-      durationMillis: currentVerseDurationMillis,
+      reciter: currentReciter,
+      isPlaying: state.isPlaying,
+      positionMillis: state.positionMs,
+      durationMillis: state.durationMs,
       playbackRate: loopSettings.playbackSpeed,
       titleOverride:
-        ladderActive && currentLadderStep
-          ? ladderPhase === 'complete'
+        ladderState && step
+          ? ladderState.phase === 'complete'
             ? `Ladder complete • Surah ${surah.englishName}`
-            : `Step ${ladderStepIndex + 1}/${ladderPlan.length} • ${
-                ladderPhase === 'recite' ? 'Your turn' : 'Listen'
-              } ${describeStep(currentLadderStep).replace(/^(Listen|Recite) /, '')}`
+            : `Step ${ladderState.stepIndex + 1}/${ladderState.plan.length} • ${ladderState.phase === 'recite' ? 'Your turn' : 'Listen'} ${describeStep(step).replace(/^(Listen|Recite) /, '')}`
           : null,
     });
-  }, [
-    isPlaying,
-    currentVerseNum,
-    fromVerse,
-    toVerse,
-    surah,
-    currentEffectiveReciter,
-    currentVersePositionMillis,
-    currentVerseDurationMillis,
-    loopSettings.playbackSpeed,
-    ladderActive,
-    currentLadderStep,
-    ladderPhase,
-    ladderStepIndex,
-    ladderPlan.length,
-  ]);
+  }, [surah, state.verse, state.isPlaying, state.positionMs, state.durationMs, fromVerse, toVerse, currentReciter, loopSettings.playbackSpeed, ladderState]);
 
+  const toggle = useCallback(() => dispatch({ type: 'TOGGLE' }), [dispatch]);
   useEffect(() => {
-    if (onPlaybackStateChange) {
-      onPlaybackStateChange({
-        isPlaying,
-        currentVerseNum,
-        togglePlayPause: handleTogglePlayPause,
-        currentReciterName: currentEffectiveReciter.shortName,
-      });
-    }
-  }, [isPlaying, currentVerseNum, currentEffectiveReciter, onPlaybackStateChange, handleTogglePlayPause]);
+    onPlaybackStateChange?.({ isPlaying: state.isPlaying, currentVerseNum: state.verse, togglePlayPause: toggle, currentReciterName: currentReciter.shortName });
+  }, [state.isPlaying, state.verse, currentReciter.shortName, onPlaybackStateChange, toggle]);
 
-  // Clear system Now Playing card when leaving the player
-  useEffect(() => {
-    return () => {
-      clearNowPlayingState();
-    };
-  }, []);
-
-  const handleSeekingChange = useCallback((isSeeking: boolean) => {
-    isUserScrubbingRef.current = isSeeking;
-  }, []);
-
-  const handleSeekAyah = useCallback(
-    async (targetAyah: number, seekFraction: number = 0) => {
-      isUserScrubbingRef.current = false;
-      lastManualSeekTimestampRef.current = Date.now();
-
-      if (isTimedReciter && isAudioLoaded()) {
-        const timing = stateRef.current.verseTimings[targetAyah];
-        if (timing) {
-          const ayahDuration = Math.max(1, timing.endMs - timing.startMs);
-          const seekOffsetMs = Math.round(seekFraction * ayahDuration);
-          const targetPosMs = timing.startMs + seekOffsetMs;
-          const ayahChanged = targetAyah !== stateRef.current.currentVerseNum;
-
-          resetPlayheadForAyah(targetAyah, stateRef.current.verseTimings, seekOffsetMs);
-          if (ayahChanged) {
-            animateVerseChange();
-          }
-          seekAudio(targetPosMs);
-        }
-      } else {
-        if (targetAyah !== stateRef.current.currentVerseNum || !isAudioLoaded()) {
-          await playVerse(targetAyah, 1, currentEffectiveReciter);
-          if (seekFraction > 0) {
-            const dur = currentVerseDurationMillis > 1 ? currentVerseDurationMillis : 10000;
-            const seekPosMs = Math.round(seekFraction * dur);
-            lastManualSeekTimestampRef.current = Date.now();
-            pendingSeekTargetMsRef.current = seekPosMs;
-            lastReportedPosRef.current = seekPosMs;
-            setCurrentVersePositionMillis(seekPosMs);
-            seekAudio(seekPosMs);
-          }
-        } else {
-          const dur = currentVerseDurationMillis > 1 ? currentVerseDurationMillis : 10000;
-          const seekPosMs = Math.round(seekFraction * dur);
-          lastManualSeekTimestampRef.current = Date.now();
-          pendingSeekTargetMsRef.current = seekPosMs;
-          lastReportedPosRef.current = seekPosMs;
-          setCurrentVersePositionMillis(seekPosMs);
-          seekAudio(seekPosMs);
-        }
-      }
-    },
-    [isTimedReciter, animateVerseChange, playVerse, currentVerseDurationMillis, currentEffectiveReciter, resetPlayheadForAyah]
+  useEffect(
+    () =>
+      registerNowPlayingHandlers({
+        onPlay: () => dispatch({ type: 'PLAY' }),
+        onPause: () => dispatch({ type: 'PAUSE' }),
+        onTogglePlayPause: () => dispatch({ type: 'TOGGLE' }),
+        onNext: () => dispatch({ type: 'NEXT' }),
+        onPrevious: () => dispatch({ type: 'PREV' }),
+        onSeekToSeconds: sec => {
+          const s = engine.getState();
+          dispatch({ type: 'SEEK_VERSE', verse: s.verse, fraction: (sec * 1000) / Math.max(1, s.durationMs) });
+        },
+        onAudioRouteLost: () => dispatch({ type: 'PAUSE' }),
+        onInterruptionBegan: () => dispatch({ type: 'PAUSE' }),
+      }),
+    [dispatch, engine]
   );
 
-  const handlePreviousVerse = useCallback(() => {
-    const curr = stateRef.current.currentVerseNum;
-    const prevAyah = Math.max(fromVerse, curr - 1);
-
-    if (isTimedReciter && isAudioLoaded()) {
-      resetPlayheadForAyah(prevAyah, stateRef.current.verseTimings, 0);
-      animateVerseChange();
-      const timing = stateRef.current.verseTimings[prevAyah];
-      if (timing) {
-        seekAudio(timing.startMs);
-      }
-    } else {
-      playVerse(prevAyah, 1, currentEffectiveReciter);
+  // ---------------------------------------------------------------- handlers
+  const handleSelectMode = (next: PlayerMode) => {
+    setModeSheetVisible(false);
+    if (next === 'ladder') {
+      if (ladderActive) return;
+      setLadderSetupVisible(true);
+      return;
     }
-  }, [fromVerse, isTimedReciter, animateVerseChange, playVerse, currentEffectiveReciter, resetPlayheadForAyah]);
-
-  const handleNextVerse = useCallback(() => {
-    const curr = stateRef.current.currentVerseNum;
-    const nextAyah = Math.min(toVerse, curr + 1);
-
-    if (isTimedReciter && isAudioLoaded()) {
-      resetPlayheadForAyah(nextAyah, stateRef.current.verseTimings, 0);
-      animateVerseChange();
-      const timing = stateRef.current.verseTimings[nextAyah];
-      if (timing) {
-        seekAudio(timing.startMs);
-      }
-    } else {
-      playVerse(nextAyah, 1, currentEffectiveReciter);
-    }
-  }, [toVerse, isTimedReciter, animateVerseChange, playVerse, currentEffectiveReciter, resetPlayheadForAyah]);
-
-  // Dynamic Island / Lock Screen / CarPlay / steering-wheel remote commands + audio route loss handling.
-  // Handlers are read through a ref so the native listeners are registered exactly once.
-  const nowPlayingHandlersRef = useRef({
-    handleExternalPlay,
-    handleExternalPause,
-    handleTogglePlayPause,
-    handleNextVerse,
-    handlePreviousVerse,
-    handleSeekAyah,
-  });
-  nowPlayingHandlersRef.current = {
-    handleExternalPlay: () => {
-      if (ladderActive && ladderRef.current.phase === 'recite') {
-        handleLadderHearAgain();
-        return;
-      }
-      if (ladderActive && ladderRef.current.phase === 'complete') return;
-      handleExternalPlay();
-    },
-    handleExternalPause,
-    handleTogglePlayPause: () => {
-      if (ladderActive && ladderRef.current.phase === 'recite') {
-        handleLadderHearAgain();
-        return;
-      }
-      if (ladderActive && ladderRef.current.phase === 'complete') return;
-      handleTogglePlayPause();
-    },
-    handleNextVerse: ladderActive ? handleLadderNextStep : handleNextVerse,
-    handlePreviousVerse: ladderActive ? handleLadderPrevStep : handlePreviousVerse,
-    handleSeekAyah,
+    if (ladderActive) dispatch({ type: 'LADDER_EXIT' });
+    setMode(next);
   };
 
-  useEffect(() => {
-    const unsubscribe = registerNowPlayingHandlers({
-      onPlay: () => nowPlayingHandlersRef.current.handleExternalPlay(),
-      onPause: () => nowPlayingHandlersRef.current.handleExternalPause(),
-      onTogglePlayPause: () => nowPlayingHandlersRef.current.handleTogglePlayPause(),
-      onNext: () => nowPlayingHandlersRef.current.handleNextVerse(),
-      onPrevious: () => nowPlayingHandlersRef.current.handlePreviousVerse(),
-      onSeekToSeconds: positionSec => {
-        const dur = Math.max(1, lastReportedDurRef.current);
-        const fraction = Math.max(0, Math.min(0.995, (positionSec * 1000) / dur));
-        nowPlayingHandlersRef.current.handleSeekAyah(stateRef.current.currentVerseNum, fraction);
-      },
-      // Car muted / CarPlay or Bluetooth disconnected: pause instead of continuing on the iPhone speaker
-      onAudioRouteLost: () => nowPlayingHandlersRef.current.handleExternalPause(),
-      onInterruptionBegan: () => nowPlayingHandlersRef.current.handleExternalPause(),
-    });
-    return unsubscribe;
+  const handleSeekAyah = useCallback((verse: number, fraction: number = 0) => dispatch({ type: 'SEEK_VERSE', verse, fraction }), [dispatch]);
+  const cycleLoopMode = useCallback(() => {
+    const order: LoopSettings['mode'][] = ['range', 'single', 'off'];
+    setLoopSettings(prev => ({ ...prev, mode: order[(order.indexOf(prev.mode) + 1) % order.length] }));
   }, []);
 
-  const handleToggleLoopMode = useCallback(() => {
-    const modes: LoopSettings['mode'][] = ['range', 'single', 'off'];
-    setLoopSettings(prev => {
-      const nextIdx = (modes.indexOf(prev.mode) + 1) % modes.length;
-      return { ...prev, mode: modes[nextIdx] };
-    });
-  }, []);
+  const modeLabel = ladderActive ? 'Hifz Ladder' : mode === 'pitch' ? 'Pitch Match' : null;
+  const modeTone = pill(ladderActive || mode === 'pitch' ? 'gold' : 'sapphire');
 
-  const totalVersesInRange = Math.max(1, toVerse - fromVerse + 1);
-
-  // Show Bismillah header if non-Fatihah and non-Tawbah on Ayah 1
-  const showBismillahHeader = surah.number !== 1 && surah.number !== 9 && currentVerseNum === 1;
-
+  // ---------------------------------------------------------------- render
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#080b11" />
+      <StatusBar barStyle="light-content" backgroundColor={colors.bg} />
 
-      {/* 1. TOP HEADER WITH VIEW SWITCHER (Recitation | Pitch Match) */}
+      {/* Header: back · (mode badge) · settings */}
       <View style={styles.header}>
-        <TouchableOpacity style={styles.navBtn} onPress={onMinimize}>
-          <Ionicons name="chevron-down" size={24} color="#ffffff" />
+        <TouchableOpacity style={styles.iconBtn} onPress={onMinimize} hitSlop={8}>
+          <Ionicons name="chevron-down" size={24} color={colors.text} />
         </TouchableOpacity>
-
-        {ladderActive ? (
-          <View style={styles.ladderHeaderBadge}>
-            <Ionicons name="layers" size={13} color="#e5b869" />
-            <Text style={styles.ladderHeaderBadgeText}>Hifz Ladder</Text>
-          </View>
+        {modeLabel ? (
+          <TouchableOpacity style={modeTone.container} onPress={() => setModeSheetVisible(true)}>
+            <Ionicons name={ladderActive ? 'layers' : 'mic'} size={12} color={modeTone.color} />
+            <Text style={modeTone.text}>{modeLabel}</Text>
+          </TouchableOpacity>
         ) : (
-        <View style={styles.headerModePill}>
-          <TouchableOpacity
-            style={[
-              styles.headerModeTab,
-              !showPitchMonitor && styles.headerModeTabActive,
-            ]}
-            onPress={() => {
-              Haptics.selectionAsync().catch(() => {});
-              setShowPitchMonitor(false);
-            }}
-          >
-            <Ionicons
-              name="book-outline"
-              size={13}
-              color={!showPitchMonitor ? '#9bbfff' : '#7e8ca3'}
-            />
-            <Text
-              style={[
-                styles.headerModeTabText,
-                !showPitchMonitor && styles.headerModeTabTextActive,
-              ]}
-            >
-              Verse
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.headerModeTab,
-              showPitchMonitor && styles.headerModeTabActive,
-            ]}
-            onPress={() => {
-              Haptics.selectionAsync().catch(() => {});
-              setShowPitchMonitor(true);
-            }}
-          >
-            <Ionicons
-              name="mic-outline"
-              size={14}
-              color={showPitchMonitor ? '#e5b869' : '#7e8ca3'}
-            />
-            <Text
-              style={[
-                styles.headerModeTabText,
-                showPitchMonitor && styles.headerModeTabTextGold,
-              ]}
-            >
-              Pitch Match
-            </Text>
-          </TouchableOpacity>
-        </View>
+          <View />
         )}
-
-        <TouchableOpacity
-          style={styles.navBtn}
-          onPress={() => setSettingsModalVisible(true)}
-        >
-          <Ionicons name="ellipsis-horizontal" size={22} color="#ffffff" />
+        <TouchableOpacity style={styles.iconBtn} onPress={() => setSettingsVisible(true)} hitSlop={8}>
+          <Ionicons name="ellipsis-horizontal" size={22} color={colors.text} />
         </TouchableOpacity>
       </View>
 
-      {/* 2. SURAH TITLE & SUBTITLE WITH DANCING SOUNDWAVE */}
-      <View style={[styles.titleSection, showPitchMonitor && styles.titleSectionCompact]}>
-        <Text style={[styles.surahTitle, showPitchMonitor && styles.surahTitleCompact]}>
-          Surah {surah.englishName}
-        </Text>
+      {/* Title */}
+      <View style={[styles.titleBlock, (showPitch || ladderActive) && styles.titleBlockCompact]}>
+        <Text style={[styles.title, (showPitch || ladderActive) && styles.titleCompact]}>Surah {surah.englishName}</Text>
         <View style={styles.subtitleRow}>
           {isMultipleMode && (
-            <View style={styles.multipleModeBadge}>
-              <Ionicons name="repeat" size={12} color="#e5b869" style={{ marginRight: 4 }} />
-              <Text style={styles.multipleModeText}>Multiple</Text>
+            <View style={pill('gold').container}>
+              <Ionicons name="repeat" size={11} color={colors.gold} />
+              <Text style={pill('gold').text}>Multiple</Text>
             </View>
           )}
-          <Text style={styles.surahSubtitle}>
-            {isMultipleMode ? currentEffectiveReciter.name : reciter.name}
-          </Text>
-          <SoundwaveVisualizer isPlaying={isPlaying} color="#9bbfff" barCount={4} maxHeight={14} />
+          <Text style={styles.subtitle}>{currentReciter.name}</Text>
+          <SoundwaveVisualizer isPlaying={state.isPlaying} color={colors.sapphire} barCount={4} maxHeight={14} />
         </View>
       </View>
 
-      {/* 2b. HIFZ LADDER HUD */}
-      {ladderActive && ladder && (
+      {/* Ladder HUD */}
+      {ladderState && (
         <HifzLadderHud
-          plan={ladderPlan}
-          stepIndex={ladderStepIndex}
-          repsDone={ladderRepsDone}
-          phase={ladderPhase}
+          plan={ladderState.plan}
+          stepIndex={ladderState.stepIndex}
+          repsDone={ladderState.repsDone}
+          phase={ladderState.phase}
           reciteRemainingSec={reciteRemainingSec}
-          reciteTiming={ladder.config.reciteTiming}
-          isTimerPaused={isReciteTimerPaused}
-          onCompleteRep={completeReciteRep}
-          onHearAgain={handleLadderHearAgain}
-          onToggleTimer={handleLadderToggleTimer}
-          onRestartLadder={handleLadderRestart}
-          onExit={handleLadderExit}
+          reciteTiming={ladderState.config.reciteTiming}
+          onCompleteRep={() => dispatch({ type: 'LADDER_COMPLETE_REP' })}
+          onHearAgain={() => dispatch({ type: 'LADDER_HEAR_AGAIN' })}
+          onRestartLadder={() => dispatch({ type: 'LADDER_RESTART' })}
+          onExit={() => dispatch({ type: 'LADDER_EXIT' })}
         />
       )}
 
-      {/* 3. MIDDLE SECTION: QURAN CARD (+ REAL-TIME VOCAL PITCH MONITOR IN SPLIT VIEW) */}
-      <View style={styles.middleSplitContainer}>
-        <Pressable
-          style={{ flex: 1 }}
-          disabled={!(ladderActive && ladderPhase === 'recite')}
-          onPress={handleHiddenCardTap}
-          onLongPress={() => setIsPeeking(true)}
-          delayLongPress={260}
-          onPressOut={() => setIsPeeking(false)}
-        >
-          <QuranCardView
-            currentVerse={currentVerse}
-            currentVerseNum={currentVerseNum}
-            showBismillahHeader={showBismillahHeader}
-            cardOpacity={cardOpacity}
-            cardScale={cardScale}
-            cardSlideX={cardSlideX}
-            auraGlow={auraGlow}
-            currentWordIndex={currentWordIndex}
-            words={words}
-            compact={showPitchMonitor}
-            hidden={ladderActive && ladderPhase === 'recite' && !isPeeking}
-          />
-        </Pressable>
-
-        {showPitchMonitor && (
-          <View style={styles.pitchMonitorWrapper}>
+      {/* Verse hero (+ pitch monitor) */}
+      <View style={styles.middle}>
+        <VerseHero
+          verse={currentVerse}
+          verseNumber={state.verse}
+          words={words}
+          activeWordIndex={activeWordIndex}
+          showBismillah={showBismillah}
+          compact={showPitch}
+          hidden={isReciting && !isPeeking}
+          onPeekStart={() => setIsPeeking(true)}
+          onPeekEnd={() => setIsPeeking(false)}
+          onDoubleTap={() => dispatch({ type: 'LADDER_HEAR_AGAIN' })}
+        />
+        {showPitch && (
+          <View style={styles.pitchWrap}>
             <VocalPitchMonitor
               surahNumber={surah.number}
-              ayahNumber={currentVerseNum}
+              ayahNumber={state.verse}
               words={words}
-              wordTimings={currentWordTimings}
-              reciter={currentEffectiveReciter}
-              positionMillis={currentVersePositionMillis}
-              durationMillis={currentVerseDurationMillis}
-              ayahStartMs={verseTimings[currentVerseNum]?.startMs || 0}
-              ayahEndMs={verseTimings[currentVerseNum]?.endMs || 0}
-              totalTrackDurationMs={durationMillis}
-              isPlaying={isPlaying}
-              echoPass={echoPass}
+              wordTimings={wordTimings}
+              reciter={currentReciter}
+              positionMillis={state.positionMs}
+              durationMillis={state.durationMs}
+              ayahStartMs={seg?.startMs ?? 0}
+              ayahEndMs={seg?.endMs ?? 0}
+              totalTrackDurationMs={trackDurationMs}
+              isPlaying={state.isPlaying}
+              echoPass={state.echoPass}
               mode={pitchMode}
-              onChangeMode={newMode => {
-                setPitchMode(newMode);
-                setEchoPass(1);
-                stateRef.current.echoPass = 1;
-              }}
-              onSeekFraction={fraction => {
-                handleSeekAyah(currentVerseNum, fraction);
-              }}
+              onChangeMode={setPitchMode}
+              onSeekFraction={fraction => handleSeekAyah(state.verse, fraction)}
             />
           </View>
         )}
       </View>
 
-      {/* 4. PERMANENTLY STATIC BOTTOM SECTION WITH SCRUBBER & CONTROLS */}
-      <View style={styles.bottomSection}>
-        {/* Interactive Scrubber Bar */}
+      {/* Scrubber + transport */}
+      <View style={styles.bottom}>
         <SegmentedPlaybackBar
-          fromVerse={effectiveFromVerse}
-          toVerse={effectiveToVerse}
-          currentVerseNum={currentVerseNum}
-          positionMillis={currentVersePositionMillis}
-          durationMillis={currentVerseDurationMillis}
+          fromVerse={state.activeFrom}
+          toVerse={state.activeTo}
+          currentVerseNum={state.verse}
+          positionMillis={state.positionMs}
+          durationMillis={state.durationMs}
           onSeekAyah={handleSeekAyah}
-          onSeekingChange={handleSeekingChange}
         />
 
-        {/* Simplified Verse Indicator: e.g. Verse 5/7 */}
-        <View style={styles.verseIndicatorBanner}>
-          <Text style={styles.verseIndicatorText}>
-            {ladderActive && currentLadderStep
-              ? `Verse ${currentVerseNum}/${toVerse} • ${describeStep(currentLadderStep)}`
-              : `Verse ${currentVerseNum}/${toVerse}`}
-          </Text>
-
-          {!ladderActive && loopSettings.verseRepeatCount > 1 && (
-            <View style={styles.repeatBadge}>
-              <Text style={styles.repeatBadgeText}>
-                {versePlayCount}/{loopSettings.verseRepeatCount}
-              </Text>
-            </View>
-          )}
-        </View>
-
-        {/* Minimalist Controls with Instant Touch-Down Response */}
-        <View style={styles.controlsRow}>
-          <BouncyTouchable
-            style={styles.controlIconBtn}
-            onPress={() => setSettingsModalVisible(true)}
-          >
-            <Feather name="sliders" size={20} color="#8a95aa" />
+        <View style={styles.transport}>
+          <BouncyTouchable style={styles.secondaryBtn} onPress={() => setModeSheetVisible(true)}>
+            <Ionicons name={ladderActive ? 'layers-outline' : mode === 'pitch' ? 'mic-outline' : 'headset-outline'} size={21} color={ladderActive || mode === 'pitch' ? colors.gold : colors.textMuted} />
           </BouncyTouchable>
 
-          <BouncyTouchable
-            style={styles.controlIconBtn}
-            triggerOnPressIn={true}
-            onPress={ladderActive ? handleLadderPrevStep : handlePreviousVerse}
-          >
-            <MaterialIcons name="skip-previous" size={30} color="#ffffff" />
+          <BouncyTouchable style={styles.secondaryBtn} triggerOnPressIn onPress={() => dispatch({ type: 'PREV' })}>
+            <Ionicons name="play-skip-back" size={26} color={colors.text} />
           </BouncyTouchable>
 
-          {/* Bouncy Play/Pause Button (✓ while reciting, ↻ when the ladder is complete) */}
-          {ladderActive && ladderPhase === 'recite' ? (
-            <BouncyTouchable
-              style={[styles.playPauseBtn, styles.playPauseBtnGold]}
-              triggerOnPressIn={true}
-              onPress={completeReciteRep}
-            >
-              <Ionicons name="checkmark" size={34} color="#0a101d" />
+          {isReciting ? (
+            <BouncyTouchable style={[styles.primaryBtn, { backgroundColor: colors.gold }, shadow.glow(colors.gold)]} triggerOnPressIn onPress={() => dispatch({ type: 'LADDER_COMPLETE_REP' })}>
+              <Ionicons name="checkmark" size={34} color={colors.bg} />
             </BouncyTouchable>
-          ) : ladderActive && ladderPhase === 'complete' ? (
-            <BouncyTouchable
-              style={[styles.playPauseBtn, styles.playPauseBtnMint]}
-              triggerOnPressIn={true}
-              onPress={handleLadderRestart}
-            >
-              <Ionicons name="refresh" size={30} color="#0a101d" />
+          ) : ladderState?.phase === 'complete' ? (
+            <BouncyTouchable style={[styles.primaryBtn, { backgroundColor: colors.mint }, shadow.glow(colors.mint)]} triggerOnPressIn onPress={() => dispatch({ type: 'LADDER_RESTART' })}>
+              <Ionicons name="refresh" size={30} color={colors.bg} />
             </BouncyTouchable>
           ) : (
-            <BouncyTouchable
-              style={styles.playPauseBtn}
-              triggerOnPressIn={true}
-              onPress={handleTogglePlayPause}
-            >
-              <Ionicons
-                name={isPlaying ? 'pause' : 'play'}
-                size={32}
-                color="#0a101d"
-                style={!isPlaying ? { marginLeft: 3 } : undefined}
-              />
+            <BouncyTouchable style={[styles.primaryBtn, shadow.glow(colors.sapphire)]} triggerOnPressIn onPress={toggle}>
+              <Ionicons name={state.isPlaying ? 'pause' : 'play'} size={32} color={colors.bg} style={!state.isPlaying ? { marginLeft: 3 } : undefined} />
             </BouncyTouchable>
           )}
 
-          <BouncyTouchable
-            style={styles.controlIconBtn}
-            triggerOnPressIn={true}
-            onPress={ladderActive ? handleLadderNextStep : handleNextVerse}
-          >
-            <MaterialIcons name="skip-next" size={30} color="#ffffff" />
+          <BouncyTouchable style={styles.secondaryBtn} triggerOnPressIn onPress={() => dispatch({ type: 'NEXT' })}>
+            <Ionicons name="play-skip-forward" size={26} color={colors.text} />
           </BouncyTouchable>
 
-          {ladderActive ? (
-            <View style={[styles.controlIconBtn, styles.loopActiveBtn]}>
-              <Ionicons name="layers-outline" size={22} color="#e5b869" />
-              <View style={[styles.loopDot, { backgroundColor: '#e5b869' }]} />
-            </View>
-          ) : (
-          <BouncyTouchable
-            style={[
-              styles.controlIconBtn,
-              loopSettings.mode !== 'off' && styles.loopActiveBtn,
-            ]}
-            triggerOnPressIn={true}
-            onPress={handleToggleLoopMode}
-          >
+          <BouncyTouchable style={styles.secondaryBtn} triggerOnPressIn disabled={ladderActive} onPress={cycleLoopMode}>
             <Ionicons
               name={loopSettings.mode === 'single' ? 'repeat-outline' : 'repeat'}
               size={22}
-              color={loopSettings.mode !== 'off' ? '#9bbfff' : '#8a95aa'}
+              color={ladderActive ? colors.textFaint : loopSettings.mode !== 'off' ? colors.sapphire : colors.textMuted}
             />
-            {loopSettings.mode !== 'off' && <View style={styles.loopDot} />}
+            {!ladderActive && loopSettings.mode !== 'off' && <View style={styles.loopDot} />}
+            {!ladderActive && loopSettings.verseRepeatCount > 1 && (
+              <Text style={styles.repeatCount}>{state.playCount}/{loopSettings.verseRepeatCount}</Text>
+            )}
           </BouncyTouchable>
-          )}
         </View>
       </View>
 
-      {/* Settings Modal */}
-      <LoopSettingsModal
-        visible={settingsModalVisible}
-        settings={loopSettings}
-        onUpdateSettings={newSettings => {
-          setLoopSettings(newSettings);
-          setAudioRate(newSettings.playbackSpeed);
+      <ModeSheet visible={modeSheetVisible} mode={ladderActive ? 'ladder' : mode} onSelect={handleSelectMode} onClose={() => setModeSheetVisible(false)} />
+
+      <HifzLadderSetupModal
+        visible={ladderSetupVisible}
+        surah={surah}
+        fromVerse={fromVerse}
+        toVerse={toVerse}
+        reciter={currentReciter}
+        onClose={() => setLadderSetupVisible(false)}
+        onStart={(config, resume) => {
+          setLadderSetupVisible(false);
+          onStartLadder?.(config, resume);
         }}
-        onClose={() => setSettingsModalVisible(false)}
+      />
+
+      <LoopSettingsModal
+        visible={settingsVisible}
+        settings={loopSettings}
+        onUpdateSettings={setLoopSettings}
+        onClose={() => setSettingsVisible(false)}
       />
     </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#080b11',
-  },
+  container: { flex: 1, backgroundColor: colors.bg },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingTop: 10,
-    paddingBottom: 8,
+    paddingHorizontal: space.xl,
+    paddingTop: space.sm,
+    paddingBottom: space.xs,
   },
-  navBtn: {
+  iconBtn: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: '#151d2d',
+    backgroundColor: colors.surfaceRaised,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  headerModePill: {
+  titleBlock: { alignItems: 'center', paddingTop: space.sm, paddingBottom: space.md },
+  titleBlockCompact: { paddingTop: 2, paddingBottom: space.xs },
+  title: { ...type.title, fontSize: 26 },
+  titleCompact: { fontSize: 20 },
+  subtitleRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: 4 },
+  subtitle: { ...type.bodyMuted, fontSize: 14 },
+  middle: { flex: 1, minHeight: 0 },
+  pitchWrap: { paddingHorizontal: space.xl, paddingBottom: space.sm },
+  bottom: { paddingBottom: space.lg },
+  transport: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#0e1422',
-    borderRadius: 18,
-    padding: 3,
-    borderWidth: 1,
-    borderColor: '#1e2a42',
+    justifyContent: 'space-evenly',
+    paddingHorizontal: space.lg,
+    marginTop: space.sm,
   },
-  headerModeTab: {
-    flexDirection: 'row',
+  secondaryBtn: { width: 52, height: 52, alignItems: 'center', justifyContent: 'center' },
+  primaryBtn: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: colors.sapphire,
     alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 15,
-  },
-  headerModeTabActive: {
-    backgroundColor: '#18243a',
-    borderWidth: 1,
-    borderColor: '#2a3e63',
-  },
-  headerModeTabText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#7e8ca3',
-  },
-  headerModeTabTextActive: {
-    color: '#9bbfff',
-    fontWeight: '700',
-  },
-  headerModeTabTextGold: {
-    color: '#e5b869',
-    fontWeight: '700',
-  },
-  ladderHeaderBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: '#272010',
-    borderWidth: 1,
-    borderColor: '#6b5424',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 18,
-  },
-  ladderHeaderBadgeText: {
-    color: '#e5b869',
-    fontSize: 12.5,
-    fontWeight: '800',
-    letterSpacing: 0.3,
-  },
-  quranCardHidden: {
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingVertical: 28,
-    borderColor: '#3a2f14',
-  },
-  hiddenPlaceholderRows: {
-    width: '80%',
-    gap: 14,
-    alignItems: 'flex-end',
-    opacity: 0.35,
-  },
-  hiddenPlaceholderLine: {
-    height: 14,
-    borderRadius: 7,
-    backgroundColor: '#2a3550',
-  },
-  hiddenCenter: {
-    alignItems: 'center',
-    gap: 4,
-    marginTop: 22,
-  },
-  hiddenTitle: {
-    color: '#e5b869',
-    fontSize: 15,
-    fontWeight: '800',
-  },
-  hiddenHint: {
-    color: '#7e8ca3',
-    fontSize: 11.5,
-    fontWeight: '600',
-  },
-  hiddenAyahNum: {
-    marginTop: 18,
-    color: '#52627a',
-    fontSize: 22,
-    fontFamily: 'UthmanicHafs',
-    writingDirection: 'rtl',
-  },
-  playPauseBtnGold: {
-    backgroundColor: '#e5b869',
-    shadowColor: '#e5b869',
-  },
-  playPauseBtnMint: {
-    backgroundColor: '#34d399',
-    shadowColor: '#34d399',
-  },
-  titleSection: {
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingTop: 8,
-    paddingBottom: 10,
-  },
-  titleSectionCompact: {
-    paddingTop: 2,
-    paddingBottom: 4,
-  },
-  surahTitle: {
-    fontSize: 24,
-    fontWeight: '800',
-    color: '#ffffff',
-    letterSpacing: -0.5,
-    marginBottom: 4,
-  },
-  surahTitleCompact: {
-    fontSize: 19,
-    marginBottom: 2,
-  },
-  subtitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  surahSubtitle: {
-    fontSize: 13,
-    color: '#8a95aa',
-  },
-  multipleModeBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#272010',
-    borderWidth: 1,
-    borderColor: '#6b5424',
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-    borderRadius: 8,
-    marginRight: 2,
-  },
-  multipleModeText: {
-    color: '#e5b869',
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0.3,
-  },
-  middleSplitContainer: {
-    flex: 1,
     justifyContent: 'center',
   },
-  pitchMonitorWrapper: {
-    paddingHorizontal: 20,
-    paddingBottom: 4,
-  },
-  cardWrapper: {
-    flex: 1,
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    justifyContent: 'center',
-    position: 'relative',
-  },
-  cardWrapperCompact: {
-    flex: 1,
-    paddingVertical: 4,
-  },
-  ambientAura: {
-    position: 'absolute',
-    top: 20,
-    bottom: 20,
-    left: 24,
-    right: 24,
-    borderRadius: 30,
-    backgroundColor: '#1e335a',
-    shadowColor: '#3b82f6',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.9,
-    shadowRadius: 35,
-  },
-  quranCard: {
-    flex: 1,
-    backgroundColor: '#121726',
-    borderRadius: 22,
-    borderWidth: 1,
-    borderColor: '#1e283d',
-    overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.45,
-    shadowRadius: 14,
-    elevation: 8,
-  },
-  cardScrollContent: {
-    paddingVertical: 24,
-    paddingHorizontal: 20,
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexGrow: 1,
-  },
-  cardScrollContentCompact: {
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-  },
-  bismillahBox: {
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  bismillahText: {
-    fontFamily: 'UthmanicHafs',
-    fontSize: 22,
-    lineHeight: 40,
-    color: '#e5b869',
-    textAlign: 'center',
-    letterSpacing: 0.5,
-  },
-  bismillahUnderline: {
-    width: 36,
-    height: 1.5,
-    backgroundColor: '#a37a34',
-    marginTop: 6,
-    borderRadius: 1,
-  },
-  tagBadge: {
-    backgroundColor: '#182133',
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    borderRadius: 12,
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: '#23304a',
-  },
-  tagText: {
-    color: '#9bbfff',
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 0.5,
-  },
-  arabicText: {
-    fontFamily: 'UthmanicHafs',
-    fontSize: 28,
-    lineHeight: 56,
-    color: '#ffffff',
-    textAlign: 'center',
-    paddingHorizontal: 6,
-    marginBottom: 16,
-  },
-  arabicTextCompact: {
-    fontSize: 22,
-    lineHeight: 40,
-    marginBottom: 6,
-  },
-  wordBase: {
-    fontFamily: 'UthmanicHafs',
-    fontSize: 28,
-    lineHeight: 56,
-    color: '#ffffff',
-    textAlign: 'center',
-  },
-  wordBaseCompact: {
-    fontSize: 22,
-    lineHeight: 40,
-  },
-  wordSpoken: {
-    color: '#ffffff',
-    opacity: 1,
-  },
-  wordCurrent: {
-    color: '#fb923c',
-    textShadowColor: 'rgba(249, 115, 22, 0.85)',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 11,
-    opacity: 1,
-  },
-  wordUpcoming: {
-    color: '#ffffff',
-    opacity: 1,
-    textShadowRadius: 0,
-  },
-  ayahEndSymbol: {
-    fontFamily: 'UthmanicHafs',
-    color: '#9bbfff',
-    fontSize: 22,
-  },
-  ayahEndSymbolCompact: {
-    fontSize: 18,
-  },
-  ayahEndSymbolActive: {
-    color: '#fb923c',
-    textShadowColor: 'rgba(249, 115, 22, 0.75)',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 8,
-  },
-  cardDivider: {
-    width: 44,
-    height: 2,
-    backgroundColor: '#202b42',
-    borderRadius: 1,
-    marginBottom: 16,
-  },
-  cardDividerCompact: {
-    marginBottom: 6,
-  },
-  translationText: {
-    fontSize: 15,
-    lineHeight: 24,
-    color: '#cbd5e1',
-    textAlign: 'center',
-    fontStyle: 'italic',
-  },
-  translationTextCompact: {
-    fontSize: 12.5,
-    lineHeight: 18,
-  },
-  bottomSection: {
-    paddingHorizontal: 24,
-    paddingBottom: 28,
-    paddingTop: 4,
-    backgroundColor: '#080b11',
-  },
-  verseIndicatorBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    alignSelf: 'center',
-    backgroundColor: '#0f1726',
-    paddingHorizontal: 16,
-    paddingVertical: 6,
-    borderRadius: 16,
-    marginTop: 2,
-    marginBottom: 14,
-    borderWidth: 1,
-    borderColor: '#1e2d44',
-  },
-  verseIndicatorText: {
-    color: '#9bbfff',
-    fontSize: 13,
-    fontWeight: '700',
-    letterSpacing: 0.3,
-  },
-  repeatBadge: {
-    backgroundColor: '#1d2d47',
-    paddingHorizontal: 6,
-    paddingVertical: 1,
-    borderRadius: 8,
-    marginLeft: 6,
-    borderWidth: 1,
-    borderColor: '#2e456b',
-  },
-  repeatBadgeText: {
-    color: '#e5b869',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  controlsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    width: '100%',
-    paddingHorizontal: 10,
-  },
-  controlIconBtn: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-    position: 'relative',
-  },
-  loopActiveBtn: {
-    backgroundColor: '#162238',
-  },
-  loopDot: {
-    position: 'absolute',
-    bottom: 5,
-    width: 4,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: '#9bbfff',
-  },
-  playPauseBtn: {
-    width: 70,
-    height: 70,
-    borderRadius: 35,
-    backgroundColor: '#9bbfff',
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#9bbfff',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.35,
-    shadowRadius: 10,
-    elevation: 8,
-  },
+  loopDot: { position: 'absolute', bottom: 8, width: 4, height: 4, borderRadius: 2, backgroundColor: colors.sapphire },
+  repeatCount: { position: 'absolute', top: 4, right: 2, ...type.caption, color: colors.sapphire, fontSize: 9.5 },
 });

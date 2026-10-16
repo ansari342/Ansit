@@ -135,7 +135,7 @@ export default function App() {
   }, []);
 
   const handleExitLadder = useCallback(() => {
-    setSession(prev => ({ ...prev, ladder: null, sessionId: Date.now() }));
+    setSession(prev => (prev.ladder ? { ...prev, ladder: null } : prev));
   }, []);
 
   const handleOpenSettings = useCallback(() => {
@@ -281,6 +281,13 @@ export default function App() {
             initialLoopSettings={loopSettings}
             ladder={session.ladder ?? null}
             onExitLadder={handleExitLadder}
+            onStartLadder={(config, resume) =>
+              handleStartPlayback(session.surah, session.fromVerse, session.toVerse, session.reciter, {
+                config,
+                resumeStepIndex: resume?.stepIndex ?? 0,
+                resumeRepsDone: resume?.repsDone ?? 0,
+              })
+            }
             onMinimize={() => setCurrentScreen('home')}
             onPlaybackStateChange={handlePlaybackStateChange}
           />

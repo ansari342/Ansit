@@ -14,10 +14,10 @@ interface HifzLadderHudProps {
   phase: LadderPhase;
   reciteRemainingSec: number | null;
   reciteTiming: 'auto' | 'tap';
-  isTimerPaused: boolean;
+  isTimerPaused?: boolean;
   onCompleteRep: () => void;
   onHearAgain: () => void;
-  onToggleTimer: () => void;
+  onToggleTimer?: () => void;
   onRestartLadder: () => void;
   onExit: () => void;
 }
@@ -33,7 +33,7 @@ export const HifzLadderHud: React.FC<HifzLadderHudProps> = ({
   phase,
   reciteRemainingSec,
   reciteTiming,
-  isTimerPaused,
+  isTimerPaused = false,
   onCompleteRep,
   onHearAgain,
   onToggleTimer,
@@ -135,12 +135,13 @@ export const HifzLadderHud: React.FC<HifzLadderHudProps> = ({
               {reciteTiming === 'auto' && (
                 <TouchableOpacity
                   style={styles.smallBtn}
+                  disabled={!onToggleTimer}
                   onPress={() => {
                     Haptics.selectionAsync().catch(() => {});
-                    onToggleTimer();
+                    onToggleTimer?.();
                   }}
                 >
-                  <Ionicons name={isTimerPaused ? 'play-outline' : 'pause-outline'} size={18} color="#c9d3e7" />
+                  <Ionicons name={onToggleTimer ? (isTimerPaused ? 'play-outline' : 'pause-outline') : 'timer-outline'} size={18} color="#c9d3e7" />
                   <Text style={styles.smallBtnText}>
                     {reciteRemainingSec !== null ? `0:${String(reciteRemainingSec).padStart(2, '0')}` : '—'}
                   </Text>
