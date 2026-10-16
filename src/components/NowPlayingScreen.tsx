@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, SafeAreaView, StatusBar } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, Feather, MaterialIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { Surah, Verse, Reciter, LoopSettings } from '../types';
 import { getVersesForSurah, parseArabicWords } from '../services/quranService';
@@ -322,28 +322,28 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
       const icon = stage === 'idle' ? 'mic' : stage === 'recording' ? 'stop' : 'play';
       const bg = stage === 'recording' ? colors.danger : colors.gold;
       return (
-        <BouncyTouchable style={[styles.primaryBtn, { backgroundColor: bg }, shadow.glow(bg)]} triggerOnPressIn onPress={() => reciteControlsRef.current?.primary()}>
+        <BouncyTouchable style={[styles.playPauseBtn, { backgroundColor: bg }, shadow.glow(bg)]} triggerOnPressIn onPress={() => reciteControlsRef.current?.primary()}>
           <Ionicons name={icon} size={stage === 'idle' ? 30 : 32} color={stage === 'recording' ? colors.text : colors.bg} style={icon === 'play' ? { marginLeft: 3 } : undefined} />
         </BouncyTouchable>
       );
     }
     if (isLadderReciting) {
       return (
-        <BouncyTouchable style={[styles.primaryBtn, { backgroundColor: colors.gold }, shadow.glow(colors.gold)]} triggerOnPressIn onPress={() => dispatch({ type: 'LADDER_COMPLETE_REP' })}>
+        <BouncyTouchable style={[styles.playPauseBtn, { backgroundColor: colors.gold }, shadow.glow(colors.gold)]} triggerOnPressIn onPress={() => dispatch({ type: 'LADDER_COMPLETE_REP' })}>
           <Ionicons name="checkmark" size={34} color={colors.bg} />
         </BouncyTouchable>
       );
     }
     if (ladderState?.phase === 'complete') {
       return (
-        <BouncyTouchable style={[styles.primaryBtn, { backgroundColor: colors.mint }, shadow.glow(colors.mint)]} triggerOnPressIn onPress={() => dispatch({ type: 'LADDER_RESTART' })}>
+        <BouncyTouchable style={[styles.playPauseBtn, { backgroundColor: colors.mint }, shadow.glow(colors.mint)]} triggerOnPressIn onPress={() => dispatch({ type: 'LADDER_RESTART' })}>
           <Ionicons name="refresh" size={30} color={colors.bg} />
         </BouncyTouchable>
       );
     }
     return (
-      <BouncyTouchable style={[styles.primaryBtn, shadow.glow(colors.sapphire)]} triggerOnPressIn onPress={toggle}>
-        <Ionicons name={state.isPlaying ? 'pause' : 'play'} size={32} color={colors.bg} style={!state.isPlaying ? { marginLeft: 3 } : undefined} />
+      <BouncyTouchable style={styles.playPauseBtn} triggerOnPressIn onPress={toggle}>
+        <Ionicons name={state.isPlaying ? 'pause' : 'play'} size={32} color="#0a101d" style={!state.isPlaying ? { marginLeft: 3 } : undefined} />
       </BouncyTouchable>
     );
   };
@@ -482,8 +482,8 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
         )}
       </View>
 
-      {/* Scrubber + transport (identical in every state except the center button) */}
-      <View style={styles.bottom}>
+      {/* 4. PERMANENTLY STATIC BOTTOM SECTION WITH SCRUBBER & SYMMETRIC 5-BUTTON CONTROLS */}
+      <View style={styles.bottomSection}>
         <SegmentedPlaybackBar
           fromVerse={state.activeFrom}
           toVerse={state.activeTo}
@@ -493,32 +493,94 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
           onSeekAyah={handleSeekAyah}
         />
 
-        <View style={styles.transport}>
-          <BouncyTouchable style={styles.secondaryBtn} triggerOnPressIn onPress={prev}>
-            <Ionicons name="play-skip-back" size={26} color={colors.text} />
+        {/* Simplified Verse Indicator: e.g. Verse 5/7 */}
+        <View style={styles.verseIndicatorBanner}>
+          <Text style={styles.verseIndicatorText}>
+            Verse {state.verse}/{state.activeTo}
+          </Text>
+
+          {!ladderActive && loopSettings.verseRepeatCount > 1 && (
+            <View style={styles.repeatBadge}>
+              <Text style={styles.repeatBadgeText}>
+                {state.playCount}/{loopSettings.verseRepeatCount}
+              </Text>
+            </View>
+          )}
+        </View>
+
+        {/* Symmetric 5-Button Controls Row (Play/Pause dead-center) */}
+        <View style={styles.controlsRow}>
+          <BouncyTouchable
+            style={styles.controlIconBtn}
+            onPress={() => setSettingsVisible(true)}
+          >
+            <Feather name="sliders" size={20} color="#8a95aa" />
+          </BouncyTouchable>
+
+          <BouncyTouchable
+            style={styles.controlIconBtn}
+            triggerOnPressIn={true}
+            onPress={prev}
+          >
+            <MaterialIcons name="skip-previous" size={30} color="#ffffff" />
           </BouncyTouchable>
 
           {renderCenter()}
 
-          <BouncyTouchable style={styles.secondaryBtn} triggerOnPressIn onPress={next}>
-            <Ionicons name="play-skip-forward" size={26} color={colors.text} />
+          <BouncyTouchable
+            style={styles.controlIconBtn}
+            triggerOnPressIn={true}
+            onPress={next}
+          >
+            <MaterialIcons name="skip-next" size={30} color="#ffffff" />
           </BouncyTouchable>
 
           {showRecite ? (
-            <BouncyTouchable style={styles.secondaryBtn} disabled={reciteStage !== 'review'} onPress={() => reciteControlsRef.current?.playAB()}>
-              <Ionicons name="repeat" size={22} color={reciteStage === 'review' ? colors.gold : colors.textFaint} />
-              <Text style={[styles.cornerLabel, { color: reciteStage === 'review' ? colors.gold : colors.textFaint }]}>A·B</Text>
+            <BouncyTouchable
+              style={[
+                styles.controlIconBtn,
+                reciteStage === 'review' && styles.loopActiveBtn,
+              ]}
+              disabled={reciteStage !== 'review'}
+              onPress={() => reciteControlsRef.current?.playAB()}
+            >
+              <Ionicons
+                name="repeat"
+                size={22}
+                color={reciteStage === 'review' ? colors.gold : colors.textFaint}
+              />
+              <Text
+                style={[
+                  styles.cornerLabel,
+                  { color: reciteStage === 'review' ? colors.gold : colors.textFaint },
+                ]}
+              >
+                A·B
+              </Text>
             </BouncyTouchable>
           ) : (
-            <BouncyTouchable style={styles.secondaryBtn} triggerOnPressIn disabled={ladderActive} onPress={cycleLoopMode}>
+            <BouncyTouchable
+              style={[
+                styles.controlIconBtn,
+                !ladderActive && loopSettings.mode !== 'off' && styles.loopActiveBtn,
+              ]}
+              triggerOnPressIn={true}
+              disabled={ladderActive}
+              onPress={cycleLoopMode}
+            >
               <Ionicons
                 name={loopSettings.mode === 'single' ? 'repeat-outline' : 'repeat'}
                 size={22}
-                color={ladderActive ? colors.textFaint : loopSettings.mode !== 'off' ? colors.sapphire : colors.textMuted}
+                color={
+                  ladderActive
+                    ? colors.textFaint
+                    : loopSettings.mode !== 'off'
+                    ? '#9bbfff'
+                    : '#8a95aa'
+                }
               />
-              {!ladderActive && loopSettings.mode !== 'off' && <View style={styles.loopDot} />}
-              {!ladderActive && loopSettings.verseRepeatCount > 1 && (
-                <Text style={styles.cornerLabel}>{state.playCount}/{loopSettings.verseRepeatCount}</Text>
+              {!ladderActive && loopSettings.mode !== 'off' && (
+                <View style={styles.loopDot} />
               )}
             </BouncyTouchable>
           )}
@@ -545,50 +607,126 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.bg },
+  container: { flex: 1, backgroundColor: '#080b11' },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: space.xl,
-    paddingTop: space.sm,
-    paddingBottom: space.xs,
+    paddingHorizontal: 20,
+    paddingTop: 10,
+    paddingBottom: 8,
   },
   iconBtn: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: colors.surfaceRaised,
+    backgroundColor: '#151d2d',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  titleBlock: { alignItems: 'center', paddingTop: space.sm, paddingBottom: space.sm },
-  titleBlockCompact: { paddingTop: 2, paddingBottom: space.xs },
-  title: { ...type.title, fontSize: 26 },
-  titleCompact: { fontSize: 20 },
-  subtitleRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: 4 },
-  subtitle: { ...type.bodyMuted, fontSize: 14 },
+  titleBlock: {
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingTop: 8,
+    paddingBottom: 10,
+  },
+  titleBlockCompact: { paddingTop: 2, paddingBottom: 4 },
+  title: {
+    fontSize: 24,
+    fontWeight: '800',
+    color: '#ffffff',
+    letterSpacing: -0.5,
+    marginBottom: 4,
+  },
+  titleCompact: { fontSize: 19, marginBottom: 2 },
+  subtitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  subtitle: { fontSize: 13, color: '#8a95aa' },
   subControl: { marginTop: space.sm, alignItems: 'center' },
-  middle: { flex: 1, minHeight: 0 },
-  pitchWrap: { paddingHorizontal: space.xl, paddingBottom: space.sm },
-  bottom: { paddingBottom: space.lg },
-  transport: {
+  middle: { flex: 1, minHeight: 0, justifyContent: 'center' },
+  pitchWrap: { paddingHorizontal: 20, paddingBottom: 4 },
+  bottomSection: {
+    paddingHorizontal: 24,
+    paddingBottom: 28,
+    paddingTop: 4,
+    backgroundColor: '#080b11',
+  },
+  verseIndicatorBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-evenly',
-    paddingHorizontal: space.lg,
-    marginTop: space.sm,
+    alignSelf: 'center',
+    backgroundColor: '#0f1726',
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    borderRadius: 16,
+    marginTop: 2,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: '#1e2d44',
   },
-  secondaryBtn: { width: 56, height: 56, alignItems: 'center', justifyContent: 'center' },
-  primaryBtn: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: colors.sapphire,
+  verseIndicatorText: {
+    color: '#9bbfff',
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+  },
+  repeatBadge: {
+    backgroundColor: '#1d2d47',
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 8,
+    marginLeft: 6,
+    borderWidth: 1,
+    borderColor: '#2e456b',
+  },
+  repeatBadgeText: {
+    color: '#e5b869',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  controlsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+    paddingHorizontal: 10,
+  },
+  controlIconBtn: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
     alignItems: 'center',
     justifyContent: 'center',
+    position: 'relative',
   },
-  loopDot: { position: 'absolute', bottom: 8, width: 4, height: 4, borderRadius: 2, backgroundColor: colors.sapphire },
-  cornerLabel: { position: 'absolute', bottom: 4, ...type.caption, color: colors.sapphire, fontSize: 9.5 },
+  loopActiveBtn: {
+    backgroundColor: '#162238',
+  },
+  loopDot: {
+    position: 'absolute',
+    bottom: 5,
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#9bbfff',
+  },
+  playPauseBtn: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+    backgroundColor: '#9bbfff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#9bbfff',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  cornerLabel: {
+    position: 'absolute',
+    bottom: 4,
+    ...type.caption,
+    color: colors.sapphire,
+    fontSize: 9.5,
+  },
 });
-
