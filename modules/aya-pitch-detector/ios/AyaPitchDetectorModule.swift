@@ -1,9 +1,12 @@
 import ExpoModulesCore
 import AVFoundation
+import Speech
 
 /**
- * AyaPitchDetector taps the iPhone microphone through AVAudioEngine and streams real-time
- * fundamental-frequency (f0) estimates to JS using the YIN algorithm with parabolic refinement.
+ * AyaPitchDetector taps the iPhone microphone through AVAudioEngine and streams:
+ * 1) Real-time fundamental-frequency (f0) estimates to JS using the YIN algorithm (~40 Hz)
+ * 2) Optional live Arabic speech recognition (`ar-SA`) via SFSpeechRecognizer (`onSpeech` event)
+ *    for Tarteel-style word-by-word recitation tracking and automatic mistake detection.
  *
  * It keeps the shared AVAudioSession in `.playAndRecord` routed to the loudspeaker (not the
  * earpiece) so the reciter guide track stays audible while the user recites along.
@@ -21,16 +24,32 @@ public class AyaPitchDetectorModule: Module {
   private var routeObserver: NSObjectProtocol?
   private var configObserver: NSObjectProtocol?
 
+  // Live Arabic Speech Recognition (SFSpeechRecognizer)
+  private var speechRecognizer: SFSpeechRecognizer?
+  private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+  private var recognitionTask: SFSpeechRecognitionTask?
+  private var speechActive = false
+
   public func definition() -> ModuleDefinition {
     Name("AyaPitchDetector")
 
-    Events("onPitch")
+    Events("onPitch", "onSpeech")
 
     AsyncFunction("start") { (promise: Promise) in
-      self.requestPermissionAndStart(promise)
+      self.requestPermissionAndStart(enableSpeech: false, promise: promise)
+    }
+
+    AsyncFunction("startSpeech") { (localeId: String?, promise: Promise) in
+      self.requestSpeechAndStart(localeId: localeId ?? "ar-SA", promise: promise)
+    }
+
+    AsyncFunction("stopSpeech") {
+      self.stopSpeechRecognition()
+      self.stopEngine()
     }
 
     AsyncFunction("stop") {
+      self.stopSpeechRecognition()
       self.stopEngine()
     }
 
@@ -39,13 +58,14 @@ public class AyaPitchDetectorModule: Module {
     }
 
     OnDestroy {
+      self.stopSpeechRecognition()
       self.stopEngine()
     }
   }
 
   // MARK: - Lifecycle
 
-  private func requestPermissionAndStart(_ promise: Promise) {
+  private func requestPermissionAndStart(enableSpeech: Bool, promise: Promise) {
     AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
       guard let self = self else {
         promise.resolve(false)
@@ -56,9 +76,95 @@ public class AyaPitchDetectorModule: Module {
         return
       }
       DispatchQueue.main.async {
-        promise.resolve(self.startEngine())
+        let ok = self.startEngine()
+        if ok && enableSpeech {
+          self.beginSpeechSession(localeId: "ar-SA")
+        }
+        promise.resolve(ok)
       }
     }
+  }
+
+  private func requestSpeechAndStart(localeId: String, promise: Promise) {
+    AVAudioSession.sharedInstance().requestRecordPermission { [weak self] micGranted in
+      guard let self = self, micGranted else {
+        promise.resolve(false)
+        return
+      }
+      SFSpeechRecognizer.requestAuthorization { status in
+        DispatchQueue.main.async {
+          let ok = self.startEngine()
+          if ok && status == .authorized {
+            self.beginSpeechSession(localeId: localeId)
+          }
+          promise.resolve(ok)
+        }
+      }
+    }
+  }
+
+  private func beginSpeechSession(localeId: String) {
+    stopSpeechRecognition()
+    let locale = Locale(identifier: localeId)
+    guard let recognizer = SFSpeechRecognizer(locale: locale) ?? SFSpeechRecognizer(locale: Locale(identifier: "ar")),
+          recognizer.isAvailable else {
+      return
+    }
+    let request = SFSpeechAudioBufferRecognitionRequest()
+    request.shouldReportPartialResults = true
+    if #available(iOS 13.0, *) {
+      if recognizer.supportsOnDeviceRecognition {
+        request.requiresOnDeviceRecognition = false
+      }
+    }
+    if #available(iOS 16.0, *) {
+      request.addsPunctuation = false
+    }
+
+    self.speechRecognizer = recognizer
+    self.recognitionRequest = request
+    self.speechActive = true
+
+    self.recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
+      guard let self = self, self.speechActive else { return }
+      if let result = result {
+        let transcript = result.bestTranscription.formattedString
+        let segments: [[String: Any]] = result.bestTranscription.segments.map { seg in
+          return [
+            "substring": seg.substring,
+            "timestamp": seg.timestamp * 1000.0,
+            "duration": seg.duration * 1000.0,
+            "confidence": Double(seg.confidence)
+          ]
+        }
+        let payload: [String: Any] = [
+          "transcript": transcript,
+          "isFinal": result.isFinal,
+          "segments": segments
+        ]
+        DispatchQueue.main.async { [weak self] in
+          self?.sendEvent("onSpeech", payload)
+        }
+      }
+      if error != nil || (result?.isFinal ?? false) {
+        // Keep engine running for metering/pitch; restart recognition request if still active
+        if self.speechActive && self.running {
+          DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self = self, self.speechActive, self.running else { return }
+            self.beginSpeechSession(localeId: localeId)
+          }
+        }
+      }
+    }
+  }
+
+  private func stopSpeechRecognition() {
+    speechActive = false
+    recognitionRequest?.endAudio()
+    recognitionTask?.cancel()
+    recognitionRequest = nil
+    recognitionTask = nil
+    speechRecognizer = nil
   }
 
   private func configureSessionForSpeakerRecording() {
@@ -90,7 +196,11 @@ public class AyaPitchDetectorModule: Module {
     ring.removeAll(keepingCapacity: true)
 
     input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-      self?.ingest(buffer)
+      guard let self = self else { return }
+      if self.speechActive {
+        self.recognitionRequest?.append(buffer)
+      }
+      self.ingest(buffer)
     }
 
     engine.prepare()

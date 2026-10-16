@@ -19,6 +19,7 @@
         "CFBundleDisplayName": "Aya",
         "CFBundleName": "Aya",
         "NSMicrophoneUsageDescription": "Aya uses your microphone to display your real-time vocal pitch and help you match the reciter's melody and pitch.",
+        "NSSpeechRecognitionUsageDescription": "Aya uses on-device Arabic speech recognition to follow your Quran recitation word-by-word and highlight slips.",
         "UIBackgroundModes": [
           "audio"
         ],

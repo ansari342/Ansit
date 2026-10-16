@@ -10,6 +10,7 @@ interface BouncyTouchableProps {
   disabled?: boolean;
   triggerOnPressIn?: boolean;
   hitSlop?: Insets;
+  accessibilityLabel?: string;
 }
 
 const DEFAULT_HIT_SLOP: Insets = { top: 10, bottom: 10, left: 10, right: 10 };
@@ -22,6 +23,7 @@ export const BouncyTouchable: React.FC<BouncyTouchableProps> = ({
   disabled = false,
   triggerOnPressIn = false,
   hitSlop = DEFAULT_HIT_SLOP,
+  accessibilityLabel,
 }) => {
   const scaleAnim = useRef(new Animated.Value(1)).current;
 
@@ -60,8 +62,12 @@ export const BouncyTouchable: React.FC<BouncyTouchableProps> = ({
       delayPressOut={0}
       hitSlop={hitSlop}
       disabled={disabled}
+      accessibilityLabel={accessibilityLabel}
     >
-      <Animated.View style={[style, { transform: [{ scale: scaleAnim }] }]}>
+      <Animated.View
+        accessibilityLabel={accessibilityLabel}
+        style={[style, { transform: [{ scale: scaleAnim }] }]}
+      >
         {children}
       </Animated.View>
     </TouchableWithoutFeedback>

@@ -207,6 +207,10 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
 
   // ---------------------------------------------------------------- derived
   const currentVerse = useMemo(() => verses.find(v => v.numberInSurah === state.verse), [verses, state.verse]);
+  const previousVerse = useMemo(
+    () => (state.verse > 1 ? verses.find(v => v.numberInSurah === state.verse - 1) : undefined),
+    [verses, state.verse]
+  );
   const words = useMemo(() => (currentVerse ? parseArabicWords(currentVerse.arabicText) : []), [currentVerse]);
   const wordTimings = useMemo(
     () => (currentVerse ? getAyahWordTimings(verseTimings[state.verse], words, !isSingleFile, state.durationMs) : []),
@@ -303,8 +307,20 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
     },
     [dispatch, showRecite]
   );
-  const prev = useCallback(() => (showRecite ? dispatch({ type: 'SET_VERSE', verse: state.verse - 1 }) : dispatch({ type: 'PREV' })), [dispatch, showRecite, state.verse]);
-  const next = useCallback(() => (showRecite ? dispatch({ type: 'SET_VERSE', verse: state.verse + 1 }) : dispatch({ type: 'NEXT' })), [dispatch, showRecite, state.verse]);
+  const prev = useCallback(() => {
+    if (showRecite) {
+      dispatch({ type: 'SET_VERSE', verse: state.verse > state.activeFrom ? state.verse - 1 : state.activeTo });
+    } else {
+      dispatch({ type: 'PREV' });
+    }
+  }, [dispatch, showRecite, state.verse, state.activeFrom, state.activeTo]);
+  const next = useCallback(() => {
+    if (showRecite) {
+      dispatch({ type: 'SET_VERSE', verse: state.verse < state.activeTo ? state.verse + 1 : state.activeFrom });
+    } else {
+      dispatch({ type: 'NEXT' });
+    }
+  }, [dispatch, showRecite, state.verse, state.activeFrom, state.activeTo]);
   const cycleLoopMode = useCallback(() => {
     const order: LoopSettings['mode'][] = ['range', 'single', 'off'];
     setLoopSettings(p => ({ ...p, mode: order[(order.indexOf(p.mode) + 1) % order.length] }));
@@ -439,7 +455,9 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
             surahNumber={surah.number}
             verse={state.verse}
             verseData={currentVerse}
+            previousVerseData={previousVerse}
             words={words}
+            wordTimings={wordTimings}
             onStageChange={setReciteStage}
             controlRef={reciteControlsRef}
           />
@@ -521,6 +539,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
             style={styles.controlIconBtn}
             triggerOnPressIn={true}
             onPress={prev}
+            accessibilityLabel="Previous verse"
           >
             <MaterialIcons name="skip-previous" size={30} color="#ffffff" />
           </BouncyTouchable>
@@ -531,6 +550,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = ({
             style={styles.controlIconBtn}
             triggerOnPressIn={true}
             onPress={next}
+            accessibilityLabel="Next verse"
           >
             <MaterialIcons name="skip-next" size={30} color="#ffffff" />
           </BouncyTouchable>

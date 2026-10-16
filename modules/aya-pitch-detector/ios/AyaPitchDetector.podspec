@@ -1,8 +1,8 @@
 Pod::Spec.new do |s|
   s.name           = 'AyaPitchDetector'
   s.version        = '1.0.0'
-  s.summary        = 'Real-time microphone pitch (f0) detection for Aya'
-  s.description    = 'Taps the AVAudioEngine microphone input and streams YIN fundamental-frequency estimates to JS at ~40 Hz.'
+  s.summary        = 'Real-time microphone pitch (f0) and Arabic speech recognition for Aya'
+  s.description    = 'Taps the AVAudioEngine microphone input and streams YIN fundamental-frequency estimates and SFSpeechRecognizer transcripts to JS.'
   s.author         = 'Ahsan Ansari'
   s.homepage       = 'https://github.com/ansari342/Ansit'
   s.license        = { :type => 'MIT' }
@@ -11,7 +11,7 @@ Pod::Spec.new do |s|
   s.static_framework = true
 
   s.dependency 'ExpoModulesCore'
-  s.frameworks = 'AVFoundation'
+  s.frameworks = ['AVFoundation', 'Speech']
 
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
